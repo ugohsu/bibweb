@@ -155,6 +155,13 @@ const api = {
       method: 'DELETE',
     });
   },
+  async bulkAddTag(keys, name) {
+    return fetch('/api/tags/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys, name }),
+    });
+  },
 };
 
 // ─── Fuzzy search (fzf-style) ────────────────────────────────────────────────
@@ -239,6 +246,9 @@ const app = createApp({
 
     // Tag editing (Tags tab)
     const newTagInput   = ref('');
+
+    // Bulk tag (sidebar footer)
+    const bulkTagInput  = ref('');
 
     // Fields edit mode
     const fieldsEditMode   = ref(false);
@@ -430,6 +440,21 @@ const app = createApp({
       await loadTags();
     }
 
+    async function bulkAddTag() {
+      const name = bulkTagInput.value.trim();
+      const keys = [...checkedKeys.value];
+      if (!name || !keys.length) return;
+      const r = await api.bulkAddTag(keys, name);
+      const result = await r.json();
+      if (result.error) { alert(result.error); return; }
+      bulkTagInput.value = '';
+      await loadEntries();
+      await loadTags();
+      if (selectedEntry.value && checkedKeys.value.has(selectedEntry.value.cite_key)) {
+        selectedEntry.value = await api.getEntry(selectedEntry.value.cite_key);
+      }
+    }
+
     // ── Methods: checkboxes & export ───────────────────────────────────────
     function toggleCheck(key, event) {
       event.stopPropagation();
@@ -540,7 +565,7 @@ const app = createApp({
       // state
       entries, selectedEntry, searchQuery, checkedKeys,
       activeTab, activeMdKey, dbPath,
-      allTags, tagFilterOpen, selectedTags, newTagInput,
+      allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
       // computed
@@ -551,7 +576,7 @@ const app = createApp({
       toggleFieldsEditMode, fieldsEditMode,
       startEditField, cancelEditField, saveField, deleteField, addField,
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
-      toggleTagFilter, clearTagFilter, addTag, removeTag,
+      toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       // helpers exposed to template
       mdKeyLabel, firstAuthor,
     };
@@ -643,6 +668,18 @@ const app = createApp({
           .bib として書き出し
           <span v-if="checkedKeys.size > 0" class="export-count">({{ checkedKeys.size }})</span>
         </button>
+        <div v-if="checkedKeys.size > 0" class="bulk-tag-row">
+          <input v-model="bulkTagInput"
+                 list="bulk-tag-datalist"
+                 placeholder="タグを一括追加..."
+                 class="bulk-tag-input"
+                 @keydown.enter.prevent="bulkAddTag">
+          <datalist id="bulk-tag-datalist">
+            <option v-for="t in allTags" :key="t.name" :value="t.name"></option>
+          </datalist>
+          <button @click="bulkAddTag" class="btn btn-save"
+                  :disabled="!bulkTagInput.trim()">追加</button>
+        </div>
       </div>
     </aside>
 

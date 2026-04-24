@@ -791,3 +791,23 @@ body {
   background: #fafafa;
 }
 .tag-add-input:focus { border-color: #1565c0; background: #fff; }
+
+/* ─── Bulk tag row (sidebar footer) ─────────────────────────────────────────── */
+.bulk-tag-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.bulk-tag-input {
+  flex: 1;
+  padding: 6px 9px;
+  border: 1px solid #bdbdbd;
+  border-radius: 5px;
+  font-size: 12px;
+  outline: none;
+  background: #fafafa;
+  min-width: 0;
+}
+.bulk-tag-input:focus { border-color: #1565c0; background: #fff; }

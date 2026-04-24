@@ -247,6 +247,34 @@ def delete_tag(db_path, cite_key, tag_name):
         )
         return True
 
+
+def bulk_add_tag(db_path, cite_keys, tag_name):
+    tag_name = tag_name.strip()
+    if not tag_name:
+        return False, "タグ名が空です"
+    if len(tag_name) > 50:
+        return False, "タグは50文字以内にしてください"
+    if ',' in tag_name:
+        return False, "タグにカンマは使えません"
+    with get_conn(db_path) as conn:
+        for cite_key in cite_keys:
+            entry = conn.execute(
+                "SELECT id FROM entries WHERE cite_key = ?", (cite_key,)
+            ).fetchone()
+            if not entry:
+                continue
+            dup = conn.execute(
+                "SELECT id FROM extras WHERE entry_id = ? AND extra_key = 'tags' AND extra_value = ?",
+                (entry["id"], tag_name)
+            ).fetchone()
+            if dup:
+                continue
+            conn.execute(
+                "INSERT INTO extras (entry_id, extra_key, extra_value) VALUES (?, 'tags', ?)",
+                (entry["id"], tag_name)
+            )
+    return True, None
+
 # ─── Cache management ─────────────────────────────────────────────────────────
 
 def ensure_cache(force=False):
@@ -361,8 +389,17 @@ class BibWebHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         parts = path.split("/")
 
+        # POST /api/tags/bulk
+        if path == "/api/tags/bulk":
+            body = self.read_json_body()
+            ok, err = bulk_add_tag(self.db_path, body.get("keys", []), body.get("name", ""))
+            if ok:
+                self.send_json({"ok": True})
+            else:
+                self.send_error_json(409, err)
+
         # POST /api/export
-        if path == "/api/export":
+        elif path == "/api/export":
             body = self.read_json_body()
             bib = export_bib(self.db_path, body.get("keys", []))
             data = bib.encode()
