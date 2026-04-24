@@ -23,7 +23,7 @@ from urllib.parse import urlparse, unquote
 DEFAULT_PORT = 8766
 CACHE_DIR = Path.home() / ".cache" / "bibweb"
 
-GITHUB_RAW_BASE = "https://raw.githubusercontent.com/ugohsu/bibweb/main/web"
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com/ugohsu/bibweb/master/web"
 
 REPO_FILES = ["index.html", "app.js", "style.css"]
 
