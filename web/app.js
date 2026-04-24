@@ -188,6 +188,9 @@ const app = createApp({
     const activeMdKey  = ref(null);
     const dbPath       = ref('');
 
+    // Fields edit mode (must be explicitly enabled to show edit/delete)
+    const fieldsEditMode   = ref(false);
+
     // Editing: fields
     const editingFieldKey  = ref(null);   // which field_key is being edited
     const editingFieldVal  = ref('');
@@ -226,6 +229,10 @@ const app = createApp({
       filteredEntries.value.every(e => checkedKeys.value.has(e.cite_key))
     );
 
+    const digestExtra = computed(() =>
+      (selectedEntry.value?.extras ?? []).find(x => x.extra_key === 'md.digest') ?? null
+    );
+
     // ── Watchers ───────────────────────────────────────────────────────────
     watch(activeMdKey, () => { /* rendering is handled by MarkdownRenderer */ });
 
@@ -260,6 +267,7 @@ const app = createApp({
     }
 
     function resetEditing() {
+      fieldsEditMode.value   = false;
       editingFieldKey.value  = null;
       editingFieldVal.value  = '';
       showNewField.value     = false;
@@ -270,6 +278,16 @@ const app = createApp({
       showNewExtra.value     = false;
       newExtraKey.value      = '';
       newExtraVal.value      = '';
+    }
+
+    function toggleFieldsEditMode() {
+      fieldsEditMode.value = !fieldsEditMode.value;
+      if (!fieldsEditMode.value) {
+        cancelEditField();
+        showNewField.value = false;
+        newFieldKey.value  = '';
+        newFieldVal.value  = '';
+      }
     }
 
     // ── Methods: checkboxes & export ───────────────────────────────────────
@@ -385,9 +403,10 @@ const app = createApp({
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
       // computed
-      filteredEntries, mdExtras, otherExtras, allChecked,
+      filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
       // methods
       selectEntry, toggleCheck, toggleAll, exportSelected,
+      toggleFieldsEditMode, fieldsEditMode,
       startEditField, cancelEditField, saveField, deleteField, addField,
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
       // helpers exposed to template
@@ -481,44 +500,63 @@ const app = createApp({
       </nav>
 
       <!-- ── Fields tab ── -->
-      <div v-show="activeTab === 'fields'" class="tab-content">
-        <table class="kv-table">
-          <tbody>
-            <tr v-for="f in selectedEntry.fields" :key="f.field_key">
-              <td class="kv-key">{{ f.field_key }}</td>
-              <td class="kv-value">
-                <template v-if="editingFieldKey === f.field_key">
-                  <textarea v-model="editingFieldVal" class="edit-textarea" rows="3"
-                            @keydown.ctrl.enter="saveField" @keydown.meta.enter="saveField"></textarea>
-                  <div class="edit-actions">
-                    <button @click="saveField" class="btn btn-save">保存</button>
-                    <button @click="cancelEditField" class="btn btn-cancel">キャンセル</button>
-                  </div>
-                </template>
-                <template v-else>
-                  <span class="kv-text">{{ f.field_value }}</span>
-                  <div class="row-actions">
-                    <button @click="startEditField(f)" class="icon-btn" title="編集">✏️</button>
-                    <button @click="deleteField(f.field_key)" class="icon-btn" title="削除">🗑️</button>
-                  </div>
-                </template>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-show="activeTab === 'fields'" class="tab-content"
+           :class="{ 'tab-content-split': digestExtra }">
 
-        <div v-if="showNewField" class="add-form">
-          <input v-model="newFieldKey" placeholder="field_key" class="add-key-input"
-                 @keydown.enter.prevent="addField">
-          <textarea v-model="newFieldVal" placeholder="値" class="add-value-input" rows="2"
-                    @keydown.ctrl.enter="addField" @keydown.meta.enter="addField"></textarea>
-          <div class="edit-actions">
-            <button @click="addField" class="btn btn-save">追加</button>
-            <button @click="showNewField = false; newFieldKey = ''; newFieldVal = ''"
-                    class="btn btn-cancel">キャンセル</button>
+        <!-- Fields panel -->
+        <div class="fields-panel">
+          <div class="fields-toolbar">
+            <button @click="toggleFieldsEditMode" class="btn-edit-mode"
+                    :class="{ active: fieldsEditMode }">
+              {{ fieldsEditMode ? '編集モード終了' : '編集' }}
+            </button>
           </div>
+
+          <table class="kv-table">
+            <tbody>
+              <tr v-for="f in selectedEntry.fields" :key="f.field_key">
+                <td class="kv-key">{{ f.field_key }}</td>
+                <td class="kv-value">
+                  <template v-if="editingFieldKey === f.field_key">
+                    <textarea v-model="editingFieldVal" class="edit-textarea" rows="3"
+                              @keydown.ctrl.enter="saveField" @keydown.meta.enter="saveField"></textarea>
+                    <div class="edit-actions">
+                      <button @click="saveField" class="btn btn-save">保存</button>
+                      <button @click="cancelEditField" class="btn btn-cancel">キャンセル</button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <span class="kv-text">{{ f.field_value }}</span>
+                    <div class="row-actions" v-if="fieldsEditMode">
+                      <button @click="startEditField(f)" class="icon-btn" title="編集">✏️</button>
+                      <button @click="deleteField(f.field_key)" class="icon-btn" title="削除">🗑️</button>
+                    </div>
+                  </template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <template v-if="fieldsEditMode">
+            <div v-if="showNewField" class="add-form">
+              <input v-model="newFieldKey" placeholder="field_key" class="add-key-input"
+                     @keydown.enter.prevent="addField">
+              <textarea v-model="newFieldVal" placeholder="値" class="add-value-input" rows="2"
+                        @keydown.ctrl.enter="addField" @keydown.meta.enter="addField"></textarea>
+              <div class="edit-actions">
+                <button @click="addField" class="btn btn-save">追加</button>
+                <button @click="showNewField = false; newFieldKey = ''; newFieldVal = ''"
+                        class="btn btn-cancel">キャンセル</button>
+              </div>
+            </div>
+            <button v-else @click="showNewField = true" class="btn btn-add">+ フィールド追加</button>
+          </template>
         </div>
-        <button v-else @click="showNewField = true" class="btn btn-add">+ フィールド追加</button>
+
+        <!-- md.digest panel (shown when available) -->
+        <div class="digest-panel" v-if="digestExtra">
+          <markdown-renderer :content="digestExtra.extra_value"></markdown-renderer>
+        </div>
       </div>
 
       <!-- ── Extras tab ── -->
