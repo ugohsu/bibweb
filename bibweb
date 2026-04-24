@@ -69,7 +69,16 @@ def list_entries(db_path):
             GROUP BY e.id
             ORDER BY e.added_at DESC
         """).fetchall()
-        return [dict(r) for r in rows]
+        entries = [dict(r) for r in rows]
+        tag_rows = conn.execute(
+            "SELECT entry_id, extra_value FROM extras WHERE extra_key = 'tags'"
+        ).fetchall()
+        tags_by_id = {}
+        for tr in tag_rows:
+            tags_by_id.setdefault(tr["entry_id"], []).append(tr["extra_value"])
+        for e in entries:
+            e["tags"] = sorted(tags_by_id.get(e["id"], []))
+        return entries
 
 
 def get_entry(db_path, cite_key):
@@ -187,6 +196,57 @@ def add_extra(db_path, cite_key, extra_key, extra_value):
         )
         return True
 
+
+def list_tags(db_path):
+    with get_conn(db_path) as conn:
+        rows = conn.execute("""
+            SELECT extra_value AS name, COUNT(*) AS count
+            FROM extras WHERE extra_key = 'tags'
+            GROUP BY extra_value ORDER BY extra_value
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_tag(db_path, cite_key, tag_name):
+    tag_name = tag_name.strip()
+    if not tag_name:
+        return False, "タグ名が空です"
+    if len(tag_name) > 50:
+        return False, "タグは50文字以内にしてください"
+    if ',' in tag_name:
+        return False, "タグにカンマは使えません"
+    with get_conn(db_path) as conn:
+        entry = conn.execute(
+            "SELECT id FROM entries WHERE cite_key = ?", (cite_key,)
+        ).fetchone()
+        if not entry:
+            return False, "Entry not found"
+        dup = conn.execute(
+            "SELECT id FROM extras WHERE entry_id = ? AND extra_key = 'tags' AND extra_value = ?",
+            (entry["id"], tag_name)
+        ).fetchone()
+        if dup:
+            return False, "すでに同じタグが付いています"
+        conn.execute(
+            "INSERT INTO extras (entry_id, extra_key, extra_value) VALUES (?, 'tags', ?)",
+            (entry["id"], tag_name)
+        )
+        return True, None
+
+
+def delete_tag(db_path, cite_key, tag_name):
+    with get_conn(db_path) as conn:
+        entry = conn.execute(
+            "SELECT id FROM entries WHERE cite_key = ?", (cite_key,)
+        ).fetchone()
+        if not entry:
+            return False
+        conn.execute(
+            "DELETE FROM extras WHERE entry_id = ? AND extra_key = 'tags' AND extra_value = ?",
+            (entry["id"], tag_name)
+        )
+        return True
+
 # ─── Cache management ─────────────────────────────────────────────────────────
 
 def ensure_cache(force=False):
@@ -275,6 +335,9 @@ class BibWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/db":
             self.send_json({"path": self.db_path})
 
+        elif path == "/api/tags":
+            self.send_json(list_tags(self.db_path))
+
         elif path == "/api/entries":
             self.send_json(list_entries(self.db_path))
 
@@ -327,6 +390,16 @@ class BibWebHandler(BaseHTTPRequestHandler):
             ok = add_extra(self.db_path, cite_key, body.get("extra_key", ""), body.get("extra_value", ""))
             self.send_json({"ok": ok})
 
+        # POST /api/entries/{key}/tags
+        elif len(parts) == 5 and parts[4] == "tags":
+            cite_key = unquote(parts[3])
+            body = self.read_json_body()
+            ok, err = add_tag(self.db_path, cite_key, body.get("name", ""))
+            if ok:
+                self.send_json({"ok": True})
+            else:
+                self.send_error_json(409, err)
+
         else:
             self.send_error_json(404, "Not found")
 
@@ -375,6 +448,13 @@ class BibWebHandler(BaseHTTPRequestHandler):
                 self.send_error_json(400, "Invalid id")
                 return
             ok = delete_extra(self.db_path, extra_id)
+            self.send_json({"ok": ok})
+
+        # DELETE /api/entries/{key}/tags/{name}
+        elif len(parts) == 6 and parts[2] == "entries" and parts[4] == "tags":
+            cite_key = unquote(parts[3])
+            tag_name = unquote(parts[5])
+            ok = delete_tag(self.db_path, cite_key, tag_name)
             self.send_json({"ok": ok})
 
         else:

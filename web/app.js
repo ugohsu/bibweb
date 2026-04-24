@@ -29,14 +29,12 @@ function renderMarkdown(text, container) {
 
   const mermaidBlocks = [];
 
-  // Extract mermaid blocks before parsing
   let src = text.replace(/```mermaid\n([\s\S]*?)```/g, (_, code) => {
     const idx = mermaidBlocks.length;
     mermaidBlocks.push(code.trim());
     return `<div class="mermaid-placeholder" data-idx="${idx}"></div>`;
   });
 
-  // Replace plantuml blocks with img tags
   src = src.replace(/```plantuml\n([\s\S]*?)```/g, (_, code) => {
     const encoded = encodePlantUML(code.trim());
     return `<img src="https://www.plantuml.com/plantuml/svg/${encoded}" class="plantuml-img" alt="PlantUML diagram">`;
@@ -44,7 +42,6 @@ function renderMarkdown(text, container) {
 
   container.innerHTML = marked.parse(src);
 
-  // Render math with KaTeX
   if (typeof renderMathInElement !== 'undefined') {
     try {
       renderMathInElement(container, {
@@ -59,7 +56,6 @@ function renderMarkdown(text, container) {
     }
   }
 
-  // Render mermaid diagrams
   if (typeof mermaid !== 'undefined' && mermaidBlocks.length > 0) {
     mermaid.initialize({ startOnLoad: false, theme: 'default' });
     container.querySelectorAll('.mermaid-placeholder').forEach(placeholder => {
@@ -144,6 +140,21 @@ const api = {
       body: JSON.stringify({ extra_key: extraKey, extra_value: value }),
     });
   },
+  async getTags() {
+    return (await fetch('/api/tags')).json();
+  },
+  async addTag(citeKey, name) {
+    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/tags`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+  },
+  async deleteTag(citeKey, name) {
+    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/tags/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  },
 };
 
 // ─── Fuzzy search (fzf-style) ────────────────────────────────────────────────
@@ -152,11 +163,6 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/**
- * Fuzzy match pattern against str.
- * Returns { score, positions } if all pattern chars appear in order, else null.
- * Scoring bonuses: consecutive runs, word/separator boundaries.
- */
 function fuzzyMatch(pattern, str) {
   const lower = str.toLowerCase();
   const pat   = pattern.toLowerCase();
@@ -176,7 +182,6 @@ function fuzzyMatch(pattern, str) {
   return pi === pat.length ? { score, positions } : null;
 }
 
-/** Wrap matched characters in <mark> tags. */
 function highlight(str, positions) {
   const posSet = new Set(positions);
   return [...str].map((ch, i) => {
@@ -219,37 +224,55 @@ const app = createApp({
 
   setup() {
     // ── State ──────────────────────────────────────────────────────────────
-    const entries      = ref([]);
+    const entries       = ref([]);
     const selectedEntry = ref(null);
-    const searchQuery  = ref('');
-    const checkedKeys  = ref(new Set());
-    const activeTab    = ref('fields');
-    const activeMdKey  = ref(null);
-    const dbPath       = ref('');
+    const searchQuery   = ref('');
+    const checkedKeys   = ref(new Set());
+    const activeTab     = ref('fields');
+    const activeMdKey   = ref(null);
+    const dbPath        = ref('');
 
-    // Fields edit mode (must be explicitly enabled to show edit/delete)
+    // Tag filter (sidebar)
+    const allTags       = ref([]);   // [{name, count}]
+    const tagFilterOpen = ref(false);
+    const selectedTags  = ref(new Set());
+
+    // Tag editing (Tags tab)
+    const newTagInput   = ref('');
+
+    // Fields edit mode
     const fieldsEditMode   = ref(false);
 
     // Editing: fields
-    const editingFieldKey  = ref(null);   // which field_key is being edited
+    const editingFieldKey  = ref(null);
     const editingFieldVal  = ref('');
     const showNewField     = ref(false);
     const newFieldKey      = ref('');
     const newFieldVal      = ref('');
 
     // Editing: extras
-    const editingExtraId   = ref(null);   // which extra id is being edited
+    const editingExtraId   = ref(null);
     const editingExtraVal  = ref('');
     const showNewExtra     = ref(false);
     const newExtraKey      = ref('');
     const newExtraVal      = ref('');
 
     // ── Computed ───────────────────────────────────────────────────────────
-    // searchResults: fuzzy-matched, scored, sorted — includes highlight HTML
+
     const searchResults = computed(() => {
+      // 1. Tag filter (AND)
+      let pool = entries.value;
+      if (selectedTags.value.size > 0) {
+        pool = pool.filter(e => {
+          const etags = new Set(e.tags ?? []);
+          return [...selectedTags.value].every(t => etags.has(t));
+        });
+      }
+
+      // 2. Fuzzy search
       const q = searchQuery.value.trim();
       if (!q) {
-        return entries.value.map(e => ({
+        return pool.map(e => ({
           entry: e,
           score: 0,
           hl: {
@@ -260,7 +283,7 @@ const app = createApp({
         }));
       }
 
-      return entries.value
+      return pool
         .map(e => {
           const km = fuzzyMatch(q, e.cite_key || '');
           const tm = fuzzyMatch(q, e.title    || '');
@@ -271,7 +294,7 @@ const app = createApp({
             (am?.score ?? 0);
           if (score === 0) return null;
 
-          const fa    = firstAuthor(e.author || '');
+          const fa      = firstAuthor(e.author || '');
           const faMatch = fuzzyMatch(q, fa);
           return {
             entry: e,
@@ -287,15 +310,30 @@ const app = createApp({
         .sort((a, b) => b.score - a.score);
     });
 
-    // filteredEntries: plain entry array derived from searchResults (for export / checkboxes)
     const filteredEntries = computed(() => searchResults.value.map(r => r.entry));
 
     const mdExtras = computed(() =>
       (selectedEntry.value?.extras ?? []).filter(x => x.extra_key.startsWith('md.'))
     );
 
+    // Extras タブには tags 行と md.* 行を表示しない
     const otherExtras = computed(() =>
-      (selectedEntry.value?.extras ?? []).filter(x => !x.extra_key.startsWith('md.'))
+      (selectedEntry.value?.extras ?? []).filter(
+        x => x.extra_key !== 'tags' && !x.extra_key.startsWith('md.')
+      )
+    );
+
+    // Tags タブ用: このエントリのタグ一覧
+    const entryTags = computed(() =>
+      (selectedEntry.value?.extras ?? [])
+        .filter(x => x.extra_key === 'tags')
+        .map(x => x.extra_value)
+        .sort()
+    );
+
+    // datalist 用: まだ付いていないグローバルタグのみ
+    const availableTags = computed(() =>
+      allTags.value.filter(t => !entryTags.value.includes(t.name))
     );
 
     const allChecked = computed(() =>
@@ -308,8 +346,6 @@ const app = createApp({
     );
 
     // ── Watchers ───────────────────────────────────────────────────────────
-    watch(activeMdKey, () => { /* rendering is handled by MarkdownRenderer */ });
-
     watch(activeTab, (tab) => {
       if (tab === 'markdown' && !activeMdKey.value && mdExtras.value.length > 0) {
         activeMdKey.value = mdExtras.value[0].extra_key;
@@ -319,6 +355,10 @@ const app = createApp({
     // ── Methods: navigation ────────────────────────────────────────────────
     async function loadEntries() {
       entries.value = await api.getEntries();
+    }
+
+    async function loadTags() {
+      allTags.value = await api.getTags();
     }
 
     async function selectEntry(key) {
@@ -335,7 +375,6 @@ const app = createApp({
     async function refreshEntry() {
       if (!selectedEntry.value) return;
       selectedEntry.value = await api.getEntry(selectedEntry.value.cite_key);
-      // Also refresh the summary row in the list
       const idx = entries.value.findIndex(e => e.cite_key === selectedEntry.value.cite_key);
       if (idx >= 0) entries.value = await api.getEntries();
     }
@@ -362,6 +401,35 @@ const app = createApp({
         newFieldKey.value  = '';
         newFieldVal.value  = '';
       }
+    }
+
+    // ── Methods: tag filter ────────────────────────────────────────────────
+    function toggleTagFilter(tagName) {
+      const s = new Set(selectedTags.value);
+      s.has(tagName) ? s.delete(tagName) : s.add(tagName);
+      selectedTags.value = s;
+    }
+
+    function clearTagFilter() {
+      selectedTags.value = new Set();
+    }
+
+    // ── Methods: tag CRUD ──────────────────────────────────────────────────
+    async function addTag() {
+      const name = newTagInput.value.trim();
+      if (!name) return;
+      const r = await api.addTag(selectedEntry.value.cite_key, name);
+      const result = await r.json();
+      if (result.error) { alert(result.error); return; }
+      newTagInput.value = '';
+      await refreshEntry();
+      await loadTags();
+    }
+
+    async function removeTag(tagName) {
+      await api.deleteTag(selectedEntry.value.cite_key, tagName);
+      await refreshEntry();
+      await loadTags();
     }
 
     // ── Methods: checkboxes & export ───────────────────────────────────────
@@ -445,7 +513,6 @@ const app = createApp({
     async function deleteExtra(id, key) {
       if (!confirm(`"${key}" を削除しますか？`)) return;
       await api.deleteExtra(id);
-      // Reset activeMdKey if it was the deleted one
       const deleted = mdExtras.value.find(x => x.id === id);
       if (deleted && activeMdKey.value === deleted.extra_key) {
         activeMdKey.value = null;
@@ -468,21 +535,25 @@ const app = createApp({
       const db = await api.getDb();
       dbPath.value = db.path;
       await loadEntries();
+      await loadTags();
     });
 
     return {
       // state
       entries, selectedEntry, searchQuery, checkedKeys,
       activeTab, activeMdKey, dbPath,
+      allTags, tagFilterOpen, selectedTags, newTagInput,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
       // computed
       searchResults, filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
+      entryTags, availableTags,
       // methods
       selectEntry, toggleCheck, toggleAll, exportSelected,
       toggleFieldsEditMode, fieldsEditMode,
       startEditField, cancelEditField, saveField, deleteField, addField,
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
+      toggleTagFilter, clearTagFilter, addTag, removeTag,
       // helpers exposed to template
       mdKeyLabel, firstAuthor,
     };
@@ -504,6 +575,31 @@ const app = createApp({
       <div class="sidebar-top">
         <input v-model="searchQuery" type="search" placeholder="検索 (CiteKey / タイトル / 著者)"
                class="search-input">
+
+        <!-- Tag filter accordion -->
+        <div v-if="allTags.length > 0" class="tag-filter">
+          <button class="tag-filter-header" @click="tagFilterOpen = !tagFilterOpen">
+            <span class="tag-filter-label">
+              タグ
+              <span v-if="selectedTags.size > 0" class="tag-active-count">{{ selectedTags.size }}</span>
+            </span>
+            <span class="tag-filter-actions">
+              <span v-if="selectedTags.size > 0" class="tag-clear-btn"
+                    @click.stop="clearTagFilter()" title="フィルタ解除">✕</span>
+              <span class="tag-filter-chevron" :class="{ open: tagFilterOpen }">›</span>
+            </span>
+          </button>
+          <div v-show="tagFilterOpen" class="tag-filter-body">
+            <label v-for="t in allTags" :key="t.name" class="tag-filter-item">
+              <input type="checkbox"
+                     :checked="selectedTags.has(t.name)"
+                     @change="toggleTagFilter(t.name)">
+              <span class="tag-filter-name">{{ t.name }}</span>
+              <span class="tag-filter-count">{{ t.count }}</span>
+            </label>
+          </div>
+        </div>
+
         <div class="sidebar-toolbar">
           <label class="check-all-label">
             <input type="checkbox" :checked="allChecked" @change="toggleAll">
@@ -530,6 +626,11 @@ const app = createApp({
             <div class="entry-meta">
               <span v-html="r.hl.author"></span>
               <template v-if="r.entry.year"> · {{ r.entry.year }}</template>
+            </div>
+            <div class="entry-tags" v-if="r.entry.tags && r.entry.tags.length > 0">
+              <span v-for="tag in r.entry.tags" :key="tag"
+                    class="entry-tag-pill"
+                    @click.stop="toggleTagFilter(tag)">{{ tag }}</span>
             </div>
           </div>
         </li>
@@ -562,10 +663,15 @@ const app = createApp({
           Fields
           <span class="tab-count">{{ selectedEntry.fields.length }}</span>
         </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'tags' }"
+                @click="activeTab = 'tags'">
+          Tags
+          <span class="tab-count">{{ entryTags.length }}</span>
+        </button>
         <button class="tab-btn" :class="{ active: activeTab === 'extras' }"
                 @click="activeTab = 'extras'">
           Extras
-          <span class="tab-count">{{ selectedEntry.extras.length }}</span>
+          <span class="tab-count">{{ otherExtras.length }}</span>
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'markdown' }"
                 @click="activeTab = 'markdown'"
@@ -579,7 +685,6 @@ const app = createApp({
       <div v-show="activeTab === 'fields'" class="tab-content"
            :class="{ 'tab-content-split': digestExtra }">
 
-        <!-- Fields panel -->
         <div class="fields-panel">
           <div class="fields-toolbar">
             <button @click="toggleFieldsEditMode" class="btn-edit-mode"
@@ -629,17 +734,38 @@ const app = createApp({
           </template>
         </div>
 
-        <!-- md.digest panel (shown when available) -->
         <div class="digest-panel" v-if="digestExtra">
           <markdown-renderer :content="digestExtra.extra_value"></markdown-renderer>
         </div>
       </div>
 
+      <!-- ── Tags tab ── -->
+      <div v-show="activeTab === 'tags'" class="tab-content">
+        <div class="tags-pills">
+          <span v-for="tag in entryTags" :key="tag" class="tag-pill">
+            {{ tag }}
+            <button class="tag-pill-remove" @click="removeTag(tag)" title="削除">×</button>
+          </span>
+          <span v-if="entryTags.length === 0" class="empty-hint">タグはまだありません。</span>
+        </div>
+        <div class="tag-add-row">
+          <input v-model="newTagInput"
+                 list="tag-datalist"
+                 placeholder="タグを追加..."
+                 class="tag-add-input"
+                 @keydown.enter.prevent="addTag">
+          <datalist id="tag-datalist">
+            <option v-for="t in availableTags" :key="t.name" :value="t.name"></option>
+          </datalist>
+          <button @click="addTag" class="btn btn-save">追加</button>
+        </div>
+      </div>
+
       <!-- ── Extras tab ── -->
       <div v-show="activeTab === 'extras'" class="tab-content">
-        <table class="kv-table" v-if="selectedEntry.extras.length > 0">
+        <table class="kv-table" v-if="otherExtras.length > 0">
           <tbody>
-            <tr v-for="x in selectedEntry.extras" :key="x.id">
+            <tr v-for="x in otherExtras" :key="x.id">
               <td class="kv-key">
                 <span :class="x.extra_key.startsWith('md.') ? 'md-key-badge' : ''">
                   {{ x.extra_key }}
@@ -670,7 +796,7 @@ const app = createApp({
 
         <div v-if="showNewExtra" class="add-form">
           <input v-model="newExtraKey"
-                 placeholder="extra_key  例: md.digest, memo, tag, file"
+                 placeholder="extra_key  例: md.digest, memo, file"
                  class="add-key-input"
                  @keydown.enter.prevent="addExtra">
           <textarea v-model="newExtraVal" placeholder="値" class="add-value-input" rows="3"
