@@ -316,11 +316,9 @@ const app = createApp({
       (selectedEntry.value?.extras ?? []).filter(x => x.extra_key.startsWith('md.'))
     );
 
-    // Extras タブには tags 行と md.* 行を表示しない
+    // Extras タブ: tags・md.* を含む全行を表示（編集・削除の手段を残す）
     const otherExtras = computed(() =>
-      (selectedEntry.value?.extras ?? []).filter(
-        x => x.extra_key !== 'tags' && !x.extra_key.startsWith('md.')
-      )
+      selectedEntry.value?.extras ?? []
     );
 
     // Tags タブ用: このエントリのタグ一覧
