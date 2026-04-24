@@ -666,16 +666,16 @@ const app = createApp({
           Tags
           <span class="tab-count">{{ entryTags.length }}</span>
         </button>
-        <button class="tab-btn" :class="{ active: activeTab === 'extras' }"
-                @click="activeTab = 'extras'">
-          Extras
-          <span class="tab-count">{{ otherExtras.length }}</span>
-        </button>
         <button class="tab-btn" :class="{ active: activeTab === 'markdown' }"
                 @click="activeTab = 'markdown'"
                 v-if="mdExtras.length > 0">
           Markdown
           <span class="tab-count">{{ mdExtras.length }}</span>
+        </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'extras' }"
+                @click="activeTab = 'extras'">
+          Extras
+          <span class="tab-count">{{ otherExtras.length }}</span>
         </button>
       </nav>
 
