@@ -628,6 +628,8 @@ const app = createApp({
             <input type="checkbox" :checked="allChecked" @change="toggleAll">
             全選択
           </label>
+          <button v-if="checkedKeys.size > 0" @click="checkedKeys = new Set()"
+                  class="deselect-btn">選択解除</button>
           <span class="entry-count">{{ filteredEntries.length }} 件</span>
         </div>
       </div>
