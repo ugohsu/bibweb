@@ -146,6 +146,45 @@ const api = {
   },
 };
 
+// ─── Fuzzy search (fzf-style) ────────────────────────────────────────────────
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Fuzzy match pattern against str.
+ * Returns { score, positions } if all pattern chars appear in order, else null.
+ * Scoring bonuses: consecutive runs, word/separator boundaries.
+ */
+function fuzzyMatch(pattern, str) {
+  const lower = str.toLowerCase();
+  const pat   = pattern.toLowerCase();
+  const positions = [];
+  let pi = 0, score = 0, consecutive = 0, lastSi = -1;
+
+  for (let si = 0; si < lower.length && pi < pat.length; si++) {
+    if (lower[si] === pat[pi]) {
+      consecutive = (lastSi === si - 1) ? consecutive + 1 : 1;
+      const wordStart = si === 0 || /[\s\-_\/\.]/.test(lower[si - 1]);
+      score += consecutive * 2 + (wordStart ? 8 : 1);
+      positions.push(si);
+      lastSi = si;
+      pi++;
+    }
+  }
+  return pi === pat.length ? { score, positions } : null;
+}
+
+/** Wrap matched characters in <mark> tags. */
+function highlight(str, positions) {
+  const posSet = new Set(positions);
+  return [...str].map((ch, i) => {
+    const e = escapeHtml(ch);
+    return posSet.has(i) ? `<mark>${e}</mark>` : e;
+  }).join('');
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const MD_KEY_LABELS = {
@@ -206,15 +245,50 @@ const app = createApp({
     const newExtraVal      = ref('');
 
     // ── Computed ───────────────────────────────────────────────────────────
-    const filteredEntries = computed(() => {
-      const q = searchQuery.value.toLowerCase().trim();
-      if (!q) return entries.value;
-      return entries.value.filter(e =>
-        (e.cite_key  || '').toLowerCase().includes(q) ||
-        (e.title     || '').toLowerCase().includes(q) ||
-        (e.author    || '').toLowerCase().includes(q)
-      );
+    // searchResults: fuzzy-matched, scored, sorted — includes highlight HTML
+    const searchResults = computed(() => {
+      const q = searchQuery.value.trim();
+      if (!q) {
+        return entries.value.map(e => ({
+          entry: e,
+          score: 0,
+          hl: {
+            cite_key: escapeHtml(e.cite_key || ''),
+            title:    escapeHtml(e.title    || ''),
+            author:   escapeHtml(firstAuthor(e.author || '')),
+          },
+        }));
+      }
+
+      return entries.value
+        .map(e => {
+          const km = fuzzyMatch(q, e.cite_key || '');
+          const tm = fuzzyMatch(q, e.title    || '');
+          const am = fuzzyMatch(q, e.author   || '');
+          const score =
+            (km?.score ?? 0) * 3 +
+            (tm?.score ?? 0) * 2 +
+            (am?.score ?? 0);
+          if (score === 0) return null;
+
+          const fa    = firstAuthor(e.author || '');
+          const faMatch = fuzzyMatch(q, fa);
+          return {
+            entry: e,
+            score,
+            hl: {
+              cite_key: km      ? highlight(e.cite_key || '', km.positions)   : escapeHtml(e.cite_key || ''),
+              title:    tm      ? highlight(e.title    || '', tm.positions)    : escapeHtml(e.title    || ''),
+              author:   faMatch ? highlight(fa, faMatch.positions)             : escapeHtml(fa),
+            },
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
     });
+
+    // filteredEntries: plain entry array derived from searchResults (for export / checkboxes)
+    const filteredEntries = computed(() => searchResults.value.map(r => r.entry));
 
     const mdExtras = computed(() =>
       (selectedEntry.value?.extras ?? []).filter(x => x.extra_key.startsWith('md.'))
@@ -403,7 +477,7 @@ const app = createApp({
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
       // computed
-      filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
+      searchResults, filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
       // methods
       selectEntry, toggleCheck, toggleAll, exportSelected,
       toggleFieldsEditMode, fieldsEditMode,
@@ -440,24 +514,26 @@ const app = createApp({
       </div>
 
       <ul class="entry-list">
-        <li v-for="e in filteredEntries" :key="e.cite_key"
+        <li v-for="r in searchResults" :key="r.entry.cite_key"
             class="entry-item"
-            :class="{ selected: selectedEntry && selectedEntry.cite_key === e.cite_key }"
-            @click="selectEntry(e.cite_key)">
+            :class="{ selected: selectedEntry && selectedEntry.cite_key === r.entry.cite_key }"
+            @click="selectEntry(r.entry.cite_key)">
           <input type="checkbox" class="entry-check"
-                 :checked="checkedKeys.has(e.cite_key)"
-                 @click="toggleCheck(e.cite_key, $event)">
+                 :checked="checkedKeys.has(r.entry.cite_key)"
+                 @click="toggleCheck(r.entry.cite_key, $event)">
           <div class="entry-info">
-            <div class="entry-key">{{ e.cite_key }}
-              <span class="entry-type-pill">{{ e.entry_type }}</span>
+            <div class="entry-key">
+              <span v-html="r.hl.cite_key"></span>
+              <span class="entry-type-pill">{{ r.entry.entry_type }}</span>
             </div>
-            <div class="entry-title">{{ e.title || '(no title)' }}</div>
+            <div class="entry-title" v-html="r.hl.title || '(no title)'"></div>
             <div class="entry-meta">
-              {{ firstAuthor(e.author) }}<template v-if="e.year"> · {{ e.year }}</template>
+              <span v-html="r.hl.author"></span>
+              <template v-if="r.entry.year"> · {{ r.entry.year }}</template>
             </div>
           </div>
         </li>
-        <li v-if="filteredEntries.length === 0" class="entry-empty">
+        <li v-if="searchResults.length === 0" class="entry-empty">
           一致するエントリがありません
         </li>
       </ul>

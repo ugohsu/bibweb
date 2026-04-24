@@ -173,6 +173,15 @@ body {
   font-size: 13px;
 }
 
+/* Fuzzy match highlight */
+.entry-list mark {
+  background: #fff176;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+  font-style: normal;
+}
+
 /* Sidebar footer */
 .sidebar-footer {
   padding: 10px;
