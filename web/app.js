@@ -375,9 +375,13 @@ const app = createApp({
       filteredEntries.value.every(e => checkedKeys.value.has(e.cite_key))
     );
 
-    const digestExtra = computed(() =>
-      (selectedEntry.value?.extras ?? []).find(x => x.extra_key === 'md.digest') ?? null
-    );
+    const digestExtra = computed(() => {
+      const extras = selectedEntry.value?.extras ?? [];
+      // md.digest を優先し、なければ先頭の md.* にフォールバック
+      return extras.find(x => x.extra_key === 'md.digest')
+          ?? extras.find(x => x.extra_key.startsWith('md.'))
+          ?? null;
+    });
 
     const fileExtras = computed(() =>
       (selectedEntry.value?.extras ?? []).filter(x => x.extra_key === 'file')
@@ -386,7 +390,7 @@ const app = createApp({
     // ── Watchers ───────────────────────────────────────────────────────────
     watch(activeTab, (tab) => {
       if (tab === 'markdown' && !activeMdKey.value && mdExtras.value.length > 0) {
-        activeMdKey.value = mdExtras.value[0].extra_key;
+        activeMdKey.value = mdExtras.value[0].id;
       }
     });
 
@@ -404,7 +408,7 @@ const app = createApp({
       activeTab.value = 'info';
       resetEditing();
       if (mdExtras.value.length > 0) {
-        activeMdKey.value = mdExtras.value[0].extra_key;
+        activeMdKey.value = mdExtras.value[0].id;
       } else {
         activeMdKey.value = null;
       }
@@ -579,7 +583,7 @@ const app = createApp({
       if (!confirm(`"${key}" を削除しますか？`)) return;
       await api.deleteExtra(id);
       const deleted = mdExtras.value.find(x => x.id === id);
-      if (deleted && activeMdKey.value === deleted.extra_key) {
+      if (deleted && activeMdKey.value === deleted.id) {
         activeMdKey.value = null;
       }
       await refreshEntry();
@@ -864,6 +868,9 @@ const app = createApp({
         </div>
 
         <div class="digest-panel" v-if="digestExtra">
+          <div v-if="digestExtra.extra_key !== 'md.digest'" class="digest-fallback-label">
+            {{ mdKeyLabel(digestExtra.extra_key) }} を表示中
+          </div>
           <markdown-renderer :content="digestExtra.extra_value"></markdown-renderer>
         </div>
       </div>
@@ -920,15 +927,15 @@ const app = createApp({
       <!-- ── Markdown tab ── -->
       <div v-show="activeTab === 'markdown'" class="tab-content tab-content-md">
         <nav class="md-tab-bar" v-if="mdExtras.length > 1">
-          <button v-for="x in mdExtras" :key="x.extra_key"
-                  class="md-tab-btn" :class="{ active: activeMdKey === x.extra_key }"
-                  @click="activeMdKey = x.extra_key">
+          <button v-for="x in mdExtras" :key="x.id"
+                  class="md-tab-btn" :class="{ active: activeMdKey === x.id }"
+                  @click="activeMdKey = x.id">
             {{ mdKeyLabel(x.extra_key) }}
           </button>
         </nav>
 
         <template v-for="x in mdExtras" :key="x.id">
-          <div v-show="activeMdKey === x.extra_key" class="md-viewer">
+          <div v-show="activeMdKey === x.id" class="md-viewer">
             <markdown-renderer :content="x.extra_value"></markdown-renderer>
           </div>
         </template>
