@@ -322,10 +322,12 @@ const app = createApp({
           const km = fuzzyMatch(q, e.cite_key || '');
           const tm = fuzzyMatch(q, e.title    || '');
           const am = fuzzyMatch(q, e.author   || '');
+          const ym = fuzzyMatch(q, e.yomi     || '');
           const score =
             (km?.score ?? 0) * 3 +
             (tm?.score ?? 0) * 2 +
-            (am?.score ?? 0);
+            (am?.score ?? 0) +
+            (ym?.score ?? 0);
           if (score === 0) return null;
 
           const fa      = firstAuthor(e.author || '');
