@@ -257,6 +257,9 @@ const app = createApp({
     const activeMdKey   = ref(null);
     const dbPath        = ref('');
 
+    // Sort mode
+    const sortMode      = ref('author');  // 'author' | 'added_at'
+
     // Tag filter (sidebar)
     const allTags       = ref([]);   // [{name, count}]
     const tagFilterOpen = ref(false);
@@ -300,7 +303,10 @@ const app = createApp({
       // 2. Fuzzy search
       const q = searchQuery.value.trim();
       if (!q) {
-        return pool.map(e => ({
+        const sorted = sortMode.value === 'added_at'
+          ? [...pool].sort((a, b) => (b.added_at || '').localeCompare(a.added_at || ''))
+          : pool;  // 'author': サーバー返却順（著者アルファベット順）をそのまま使う
+        return sorted.map(e => ({
           entry: e,
           score: 0,
           hl: {
@@ -599,6 +605,7 @@ const app = createApp({
       // state
       entries, selectedEntry, searchQuery, checkedKeys,
       activeTab, activeMdKey, dbPath,
+      sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
@@ -657,6 +664,16 @@ const app = createApp({
               <span class="tag-filter-count">{{ t.count }}</span>
             </label>
           </div>
+        </div>
+
+        <div class="sort-selector">
+          <span class="sort-selector-label">並び順</span>
+          <label class="sort-option" :class="{ active: sortMode === 'author' }">
+            <input type="radio" v-model="sortMode" value="author">著者順
+          </label>
+          <label class="sort-option" :class="{ active: sortMode === 'added_at' }">
+            <input type="radio" v-model="sortMode" value="added_at">追加順
+          </label>
         </div>
 
         <div class="sidebar-toolbar">
