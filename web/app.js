@@ -209,6 +209,16 @@ function mdKeyLabel(key) {
   return MD_KEY_LABELS[key] ?? key;
 }
 
+function fileLabel(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    const last = pathname.split('/').filter(Boolean).pop();
+    return last ? decodeURIComponent(last) : url;
+  } catch {
+    return url;
+  }
+}
+
 function firstAuthor(author) {
   if (!author) return '';
   return author.split(/\s+and\s+/i)[0].trim();
@@ -235,7 +245,7 @@ const app = createApp({
     const selectedEntry = ref(null);
     const searchQuery   = ref('');
     const checkedKeys   = ref(new Set());
-    const activeTab     = ref('fields');
+    const activeTab     = ref('info');
     const activeMdKey   = ref(null);
     const dbPath        = ref('');
 
@@ -353,6 +363,10 @@ const app = createApp({
       (selectedEntry.value?.extras ?? []).find(x => x.extra_key === 'md.digest') ?? null
     );
 
+    const fileExtras = computed(() =>
+      (selectedEntry.value?.extras ?? []).filter(x => x.extra_key === 'file')
+    );
+
     // ── Watchers ───────────────────────────────────────────────────────────
     watch(activeTab, (tab) => {
       if (tab === 'markdown' && !activeMdKey.value && mdExtras.value.length > 0) {
@@ -371,7 +385,7 @@ const app = createApp({
 
     async function selectEntry(key) {
       selectedEntry.value = await api.getEntry(key);
-      activeTab.value = 'fields';
+      activeTab.value = 'info';
       resetEditing();
       if (mdExtras.value.length > 0) {
         activeMdKey.value = mdExtras.value[0].extra_key;
@@ -570,6 +584,7 @@ const app = createApp({
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
       // computed
       searchResults, filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
+      fileExtras,
       entryTags, availableTags,
       // methods
       selectEntry, toggleCheck, toggleAll, exportSelected,
@@ -578,7 +593,7 @@ const app = createApp({
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       // helpers exposed to template
-      mdKeyLabel, firstAuthor,
+      mdKeyLabel, fileLabel, firstAuthor,
     };
   },
 
@@ -695,15 +710,10 @@ const app = createApp({
 
       <!-- Tab bar -->
       <nav class="tab-bar">
-        <button class="tab-btn" :class="{ active: activeTab === 'fields' }"
-                @click="activeTab = 'fields'">
-          Fields
+        <button class="tab-btn" :class="{ active: activeTab === 'info' }"
+                @click="activeTab = 'info'">
+          Info
           <span class="tab-count">{{ selectedEntry.fields.length }}</span>
-        </button>
-        <button class="tab-btn" :class="{ active: activeTab === 'tags' }"
-                @click="activeTab = 'tags'">
-          Tags
-          <span class="tab-count">{{ entryTags.length }}</span>
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'markdown' }"
                 @click="activeTab = 'markdown'"
@@ -718,8 +728,8 @@ const app = createApp({
         </button>
       </nav>
 
-      <!-- ── Fields tab ── -->
-      <div v-show="activeTab === 'fields'" class="tab-content"
+      <!-- ── Info tab ── -->
+      <div v-show="activeTab === 'info'" class="tab-content"
            :class="{ 'tab-content-split': digestExtra }">
 
         <div class="fields-panel">
@@ -769,32 +779,45 @@ const app = createApp({
             </div>
             <button v-else @click="showNewField = true" class="btn btn-add">+ フィールド追加</button>
           </template>
+
+          <!-- Tags section -->
+          <div class="info-section">
+            <div class="info-section-label">タグ</div>
+            <div class="tags-pills">
+              <span v-for="tag in entryTags" :key="tag" class="tag-pill">
+                {{ tag }}
+                <button class="tag-pill-remove" @click="removeTag(tag)" title="削除">×</button>
+              </span>
+              <span v-if="entryTags.length === 0" class="empty-hint">タグはまだありません。</span>
+            </div>
+            <div class="tag-add-row">
+              <input v-model="newTagInput"
+                     list="tag-datalist"
+                     placeholder="タグを追加..."
+                     class="tag-add-input"
+                     @keydown.enter.prevent="addTag">
+              <datalist id="tag-datalist">
+                <option v-for="t in availableTags" :key="t.name" :value="t.name"></option>
+              </datalist>
+              <button @click="addTag" class="btn btn-save">追加</button>
+            </div>
+          </div>
+
+          <!-- File links section -->
+          <div class="info-section" v-if="fileExtras.length > 0">
+            <div class="info-section-label">ファイル</div>
+            <ul class="file-list">
+              <li v-for="x in fileExtras" :key="x.id">
+                <a :href="x.extra_value" target="_blank" rel="noopener" class="file-link">
+                  {{ fileLabel(x.extra_value) }}
+                </a>
+              </li>
+            </ul>
+          </div>
         </div>
 
         <div class="digest-panel" v-if="digestExtra">
           <markdown-renderer :content="digestExtra.extra_value"></markdown-renderer>
-        </div>
-      </div>
-
-      <!-- ── Tags tab ── -->
-      <div v-show="activeTab === 'tags'" class="tab-content">
-        <div class="tags-pills">
-          <span v-for="tag in entryTags" :key="tag" class="tag-pill">
-            {{ tag }}
-            <button class="tag-pill-remove" @click="removeTag(tag)" title="削除">×</button>
-          </span>
-          <span v-if="entryTags.length === 0" class="empty-hint">タグはまだありません。</span>
-        </div>
-        <div class="tag-add-row">
-          <input v-model="newTagInput"
-                 list="tag-datalist"
-                 placeholder="タグを追加..."
-                 class="tag-add-input"
-                 @keydown.enter.prevent="addTag">
-          <datalist id="tag-datalist">
-            <option v-for="t in availableTags" :key="t.name" :value="t.name"></option>
-          </datalist>
-          <button @click="addTag" class="btn btn-save">追加</button>
         </div>
       </div>
 
