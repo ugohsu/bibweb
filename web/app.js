@@ -103,6 +103,14 @@ const api = {
     });
     return r.text();
   },
+  async exportDb(keys) {
+    const r = await fetch('/api/export/db', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys }),
+    });
+    return r.blob();
+  },
   async updateField(citeKey, fieldKey, value) {
     return fetch(`/api/entries/${encodeURIComponent(citeKey)}/fields/${encodeURIComponent(fieldKey)}`, {
       method: 'PUT',
@@ -492,6 +500,18 @@ const app = createApp({
       downloadBlob(bib, 'export.bib');
     }
 
+    async function exportSelectedDb() {
+      const keys = [...checkedKeys.value];
+      if (!keys.length) { alert('エントリを選択してください'); return; }
+      const blob = await api.exportDb(keys);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'export.db';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
     // ── Methods: field CRUD ────────────────────────────────────────────────
     function startEditField(field) {
       editingFieldKey.value = field.field_key;
@@ -591,6 +611,7 @@ const app = createApp({
       toggleFieldsEditMode, fieldsEditMode,
       startEditField, cancelEditField, saveField, deleteField, addField,
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
+      exportSelectedDb,
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       // helpers exposed to template
       mdKeyLabel, fileLabel, firstAuthor,
@@ -680,11 +701,18 @@ const app = createApp({
       </ul>
 
       <div class="sidebar-footer">
-        <button @click="exportSelected" class="btn btn-export"
-                :disabled="checkedKeys.size === 0">
-          .bib として書き出し
-          <span v-if="checkedKeys.size > 0" class="export-count">({{ checkedKeys.size }})</span>
-        </button>
+        <div class="export-row">
+          <button @click="exportSelected" class="btn btn-export"
+                  :disabled="checkedKeys.size === 0">
+            .bib
+            <span v-if="checkedKeys.size > 0" class="export-count">({{ checkedKeys.size }})</span>
+          </button>
+          <button @click="exportSelectedDb" class="btn btn-export"
+                  :disabled="checkedKeys.size === 0">
+            .db
+            <span v-if="checkedKeys.size > 0" class="export-count">({{ checkedKeys.size }})</span>
+          </button>
+        </div>
         <div v-if="checkedKeys.size > 0" class="bulk-tag-row">
           <input v-model="bulkTagInput"
                  list="bulk-tag-datalist"
