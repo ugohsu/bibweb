@@ -9,6 +9,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -58,17 +59,55 @@ def get_conn(db_path):
     return conn
 
 
+# jecon の is.kanji.str$ に相当: ひらがな・カタカナ・漢字・半角カナを検出
+_CJK_RE = re.compile(r'[぀-ヿ一-鿿･-ﾟ]')
+
+
+def _sort_name(entry):
+    """jecon の sort.format.names に相当。
+    yomi があればそれを使い、なければ author 第一著者の姓を正規化して返す。
+    yomi はひらがなのため Unicode 順で ASCII より後に来る → 英語文献が自動的に前になる。"""
+    yomi = (entry.get('yomi') or '').strip()
+    if yomi:
+        return yomi
+    author = (entry.get('author') or '').strip()
+    if not author:
+        return ''
+    first = re.split(r'\s+and\s+', author, flags=re.IGNORECASE)[0].strip()
+    # "Last, First" 形式 → カンマ前が姓
+    if ',' in first:
+        last = first.split(',', 1)[0].strip()
+    else:
+        # "First Last" 形式 → 末尾の単語を姓とみなす
+        parts = first.split()
+        last = parts[-1] if parts else first
+    # CJK 文字を含む場合はそのまま返す（yomi なし日本語文献の例外; CJK は Unicode 順で ASCII より後に来る）
+    if _CJK_RE.search(last):
+        return last
+    # jecon の sortify 相当: 記号除去・小文字化（LaTeX コマンドも除去される）
+    return re.sub(r'[^a-z0-9]', '', last.lower())
+
+
+def _entry_sort_key(entry):
+    """jecon の sort.key$ 相当: sort_name → year → title"""
+    name  = _sort_name(entry)
+    year  = entry.get('year') or '9999'
+    title = re.sub(r'[^a-z0-9]', '', (entry.get('title') or '').lower())
+    return (name, year, title)
+
+
 def list_entries(db_path):
     with get_conn(db_path) as conn:
         rows = conn.execute("""
             SELECT e.id, e.cite_key, e.entry_type, e.added_at,
-                   MAX(CASE WHEN f.field_key = 'title'  THEN f.field_value END) AS title,
-                   MAX(CASE WHEN f.field_key = 'author' THEN f.field_value END) AS author,
-                   MAX(CASE WHEN f.field_key = 'year'   THEN f.field_value END) AS year
+                   MAX(CASE WHEN f.field_key = 'title'    THEN f.field_value END) AS title,
+                   MAX(CASE WHEN f.field_key = 'author'   THEN f.field_value END) AS author,
+                   MAX(CASE WHEN f.field_key = 'year'     THEN f.field_value END) AS year,
+                   MAX(CASE WHEN f.field_key = 'yomi'     THEN f.field_value END) AS yomi,
+                   MAX(CASE WHEN f.field_key = 'language' THEN f.field_value END) AS language
             FROM entries e
             LEFT JOIN fields f ON f.entry_id = e.id
             GROUP BY e.id
-            ORDER BY e.added_at DESC
         """).fetchall()
         entries = [dict(r) for r in rows]
         tag_rows = conn.execute(
@@ -79,6 +118,7 @@ def list_entries(db_path):
             tags_by_id.setdefault(tr["entry_id"], []).append(tr["extra_value"])
         for e in entries:
             e["tags"] = sorted(tags_by_id.get(e["id"], []))
+        entries.sort(key=_entry_sort_key)
         return entries
 
 
