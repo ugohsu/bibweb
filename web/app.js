@@ -28,6 +28,11 @@ function renderMarkdown(text, container) {
   marked.setOptions({ gfm: true, breaks: true });
 
   const mermaidBlocks = [];
+  const mathBlocks = [];   // display math  $$...$$
+  const mathInlines = [];  // inline math   $...$
+
+  // Extract fenced code blocks and mermaid/plantuml first to avoid touching their content.
+  // Then extract math blocks before marked.js can mangle them.
 
   let src = text.replace(/```mermaid\n([\s\S]*?)```/g, (_, code) => {
     const idx = mermaidBlocks.length;
@@ -40,9 +45,55 @@ function renderMarkdown(text, container) {
     return `<img src="https://www.plantuml.com/plantuml/svg/${encoded}" class="plantuml-img" alt="PlantUML diagram">`;
   });
 
+  // Protect display math ($$...$$) from marked.js — must come before inline math.
+  src = src.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
+    const idx = mathBlocks.length;
+    mathBlocks.push(math);
+    return `<span class="math-display-placeholder" data-idx="${idx}"></span>`;
+  });
+
+  // Protect inline math ($...$). Exclude currency patterns like $1,234 by requiring
+  // that the closing $ is preceded by a non-space character.
+  src = src.replace(/\$([^\n$]+?)\$/g, (_, math) => {
+    const idx = mathInlines.length;
+    mathInlines.push(math);
+    return `<span class="math-inline-placeholder" data-idx="${idx}"></span>`;
+  });
+
   container.innerHTML = marked.parse(src);
 
-  if (typeof renderMathInElement !== 'undefined') {
+  // Restore math placeholders and render with KaTeX directly.
+  if (typeof katex !== 'undefined') {
+    container.querySelectorAll('.math-display-placeholder').forEach(el => {
+      const idx = parseInt(el.dataset.idx, 10);
+      try {
+        el.outerHTML = katex.renderToString(mathBlocks[idx], { displayMode: true, throwOnError: false });
+      } catch (e) {
+        el.outerHTML = `<code>$$${mathBlocks[idx]}$$</code>`;
+      }
+    });
+    container.querySelectorAll('.math-inline-placeholder').forEach(el => {
+      const idx = parseInt(el.dataset.idx, 10);
+      try {
+        el.outerHTML = katex.renderToString(mathInlines[idx], { displayMode: false, throwOnError: false });
+      } catch (e) {
+        el.outerHTML = `<code>$${mathInlines[idx]}$</code>`;
+      }
+    });
+  } else if (typeof renderMathInElement !== 'undefined') {
+    // Fallback: restore placeholders as raw delimiters and let auto-render handle them.
+    container.querySelectorAll('.math-display-placeholder').forEach(el => {
+      const idx = parseInt(el.dataset.idx, 10);
+      const span = document.createElement('span');
+      span.textContent = `$$${mathBlocks[idx]}$$`;
+      el.replaceWith(span);
+    });
+    container.querySelectorAll('.math-inline-placeholder').forEach(el => {
+      const idx = parseInt(el.dataset.idx, 10);
+      const span = document.createElement('span');
+      span.textContent = `$${mathInlines[idx]}$`;
+      el.replaceWith(span);
+    });
     try {
       renderMathInElement(container, {
         delimiters: [
