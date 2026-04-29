@@ -311,6 +311,16 @@ const app = createApp({
     // Sort mode
     const sortMode      = ref('author');  // 'author' | 'added_at'
 
+    // Scroll position memory (plain Maps, no reactivity needed)
+    const digestScrollMap = new Map(); // cite_key → scrollTop
+    const mdScrollMap     = new Map(); // extra id → scrollTop
+    const digestPanelRef  = ref(null);
+    const mdViewerEls     = new Map();
+    function setMdViewerRef(id, el) {
+      if (el) mdViewerEls.set(id, el);
+      else mdViewerEls.delete(id);
+    }
+
     // Tag filter (sidebar)
     const allTags       = ref([]);   // [{name, count}]
     const tagFilterOpen = ref(false);
@@ -445,6 +455,19 @@ const app = createApp({
       }
     });
 
+    watch(activeMdKey, (newId, oldId) => {
+      if (oldId != null && mdViewerEls.has(oldId)) {
+        mdScrollMap.set(oldId, mdViewerEls.get(oldId).scrollTop);
+      }
+      if (newId != null) {
+        nextTick(() => {
+          if (mdViewerEls.has(newId)) {
+            mdViewerEls.get(newId).scrollTop = mdScrollMap.get(newId) ?? 0;
+          }
+        });
+      }
+    });
+
     // ── Methods: navigation ────────────────────────────────────────────────
     async function loadEntries() {
       entries.value = await api.getEntries();
@@ -455,6 +478,14 @@ const app = createApp({
     }
 
     async function selectEntry(key) {
+      if (selectedEntry.value) {
+        if (digestPanelRef.value) {
+          digestScrollMap.set(selectedEntry.value.cite_key, digestPanelRef.value.scrollTop);
+        }
+        for (const [id, el] of mdViewerEls) {
+          mdScrollMap.set(id, el.scrollTop);
+        }
+      }
       selectedEntry.value = await api.getEntry(key);
       activeTab.value = 'info';
       resetEditing();
@@ -462,6 +493,13 @@ const app = createApp({
         activeMdKey.value = mdExtras.value[0].id;
       } else {
         activeMdKey.value = null;
+      }
+      await nextTick();
+      if (digestPanelRef.value) {
+        digestPanelRef.value.scrollTop = digestScrollMap.get(key) ?? 0;
+      }
+      for (const [id, el] of mdViewerEls) {
+        el.scrollTop = mdScrollMap.get(id) ?? 0;
       }
     }
 
@@ -679,6 +717,8 @@ const app = createApp({
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       // helpers exposed to template
       mdKeyLabel, fileLabel, firstAuthor,
+      // scroll memory refs
+      digestPanelRef, setMdViewerRef,
     };
   },
 
@@ -918,7 +958,7 @@ const app = createApp({
           </div>
         </div>
 
-        <div class="digest-panel" v-if="digestExtra">
+        <div class="digest-panel" v-if="digestExtra" ref="digestPanelRef">
           <div v-if="digestExtra.extra_key !== 'md.digest'" class="digest-fallback-label">
             {{ mdKeyLabel(digestExtra.extra_key) }} を表示中
           </div>
@@ -986,7 +1026,7 @@ const app = createApp({
         </nav>
 
         <template v-for="x in mdExtras" :key="x.id">
-          <div v-show="activeMdKey === x.id" class="md-viewer">
+          <div v-show="activeMdKey === x.id" class="md-viewer" :ref="el => setMdViewerRef(x.id, el)">
             <markdown-renderer :content="x.extra_value"></markdown-renderer>
           </div>
         </template>
