@@ -989,7 +989,7 @@ const app = createApp({
       </div>
 
       <!-- ── Markdown tab ── -->
-      <div v-show="activeTab === 'markdown'" class="tab-content tab-content-md">
+      <div v-if="activeTab === 'markdown'" class="tab-content tab-content-md">
         <nav class="md-tab-bar" v-if="mdExtras.length > 1">
           <button v-for="x in mdExtras" :key="x.id"
                   class="md-tab-btn" :class="{ active: activeMdKey === x.id }"
