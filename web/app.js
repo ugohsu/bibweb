@@ -311,15 +311,9 @@ const app = createApp({
     // Sort mode
     const sortMode      = ref('author');  // 'author' | 'added_at'
 
-    // Scroll position memory (plain Maps, no reactivity needed)
+    // Scroll position memory
     const digestScrollMap = new Map(); // cite_key → scrollTop
-    const mdScrollMap     = new Map(); // extra id → scrollTop
     const digestPanelRef  = ref(null);
-    const mdViewerEls     = new Map();
-    function setMdViewerRef(id, el) {
-      if (el) mdViewerEls.set(id, el);
-      else mdViewerEls.delete(id);
-    }
 
     // Tag filter (sidebar)
     const allTags       = ref([]);   // [{name, count}]
@@ -455,19 +449,6 @@ const app = createApp({
       }
     });
 
-    watch(activeMdKey, (newId, oldId) => {
-      if (oldId != null && mdViewerEls.has(oldId)) {
-        mdScrollMap.set(oldId, mdViewerEls.get(oldId).scrollTop);
-      }
-      if (newId != null) {
-        nextTick(() => {
-          if (mdViewerEls.has(newId)) {
-            mdViewerEls.get(newId).scrollTop = mdScrollMap.get(newId) ?? 0;
-          }
-        });
-      }
-    });
-
     // ── Methods: navigation ────────────────────────────────────────────────
     async function loadEntries() {
       entries.value = await api.getEntries();
@@ -478,13 +459,8 @@ const app = createApp({
     }
 
     async function selectEntry(key) {
-      if (selectedEntry.value) {
-        if (digestPanelRef.value) {
-          digestScrollMap.set(selectedEntry.value.cite_key, digestPanelRef.value.scrollTop);
-        }
-        for (const [id, el] of mdViewerEls) {
-          mdScrollMap.set(id, el.scrollTop);
-        }
+      if (selectedEntry.value && digestPanelRef.value) {
+        digestScrollMap.set(selectedEntry.value.cite_key, digestPanelRef.value.scrollTop);
       }
       selectedEntry.value = await api.getEntry(key);
       activeTab.value = 'info';
@@ -497,9 +473,6 @@ const app = createApp({
       await nextTick();
       if (digestPanelRef.value) {
         digestPanelRef.value.scrollTop = digestScrollMap.get(key) ?? 0;
-      }
-      for (const [id, el] of mdViewerEls) {
-        el.scrollTop = mdScrollMap.get(id) ?? 0;
       }
     }
 
@@ -718,7 +691,7 @@ const app = createApp({
       // helpers exposed to template
       mdKeyLabel, fileLabel, firstAuthor,
       // scroll memory refs
-      digestPanelRef, setMdViewerRef,
+      digestPanelRef,
     };
   },
 
@@ -1026,7 +999,7 @@ const app = createApp({
         </nav>
 
         <template v-for="x in mdExtras" :key="x.id">
-          <div v-show="activeMdKey === x.id" class="md-viewer" :ref="el => setMdViewerRef(x.id, el)">
+          <div v-show="activeMdKey === x.id" class="md-viewer">
             <markdown-renderer :content="x.extra_value"></markdown-renderer>
           </div>
         </template>
