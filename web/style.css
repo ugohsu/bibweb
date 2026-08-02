@@ -1055,3 +1055,51 @@ body {
   padding: 6px 10px;
   margin-bottom: 14px;
 }
+
+.similar-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+
+.similar-warning-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f57f17;
+}
+
+.similar-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-top: 1px solid #ffecb3;
+}
+.similar-item:first-of-type { border-top: none; }
+
+.similar-key {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-weight: 600;
+  color: #1565c0;
+}
+
+.similar-title { color: #212121; }
+
+.similar-meta { color: #757575; }
+
+.similar-reason {
+  margin-left: auto;
+  font-size: 11px;
+  color: #f57f17;
+  background: #fff3c4;
+  border-radius: 3px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}

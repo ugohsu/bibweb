@@ -408,6 +408,79 @@ function makeCitekey(fields, existingKeys) {
   return base + '_dup';
 }
 
+// ─── 類似エントリ検出 ─────────────────────────────────────────────────────────────
+// bibdb の `dedup`（DOI完全一致 or 正規化タイトルの SequenceMatcher 類似度）と同じ基準を採用。
+// 著者名・年度は表記揺れに弱いためスコアには使わず、候補の付随情報としてのみ表示する。
+
+function findLongestMatch(a, b, aLo, aHi, bLo, bHi) {
+  let bestI = aLo, bestJ = bLo, bestSize = 0;
+  let j2len = new Map();
+  for (let i = aLo; i < aHi; i++) {
+    const newJ2len = new Map();
+    for (let j = bLo; j < bHi; j++) {
+      if (a[i] === b[j]) {
+        const k = (j2len.get(j - 1) || 0) + 1;
+        newJ2len.set(j, k);
+        if (k > bestSize) {
+          bestI = i - k + 1;
+          bestJ = j - k + 1;
+          bestSize = k;
+        }
+      }
+    }
+    j2len = newJ2len;
+  }
+  return [bestI, bestJ, bestSize];
+}
+
+function collectMatchingBlocks(a, b, aLo, aHi, bLo, bHi, out) {
+  const [i, j, k] = findLongestMatch(a, b, aLo, aHi, bLo, bHi);
+  if (k === 0) return;
+  if (aLo < i && bLo < j) collectMatchingBlocks(a, b, aLo, i, bLo, j, out);
+  out.push(k);
+  if (i + k < aHi && j + k < bHi) collectMatchingBlocks(a, b, i + k, aHi, j + k, bHi, out);
+}
+
+// Python の difflib.SequenceMatcher(None, a, b).ratio() と同じ定義（autojunk判定は省略）
+function sequenceRatio(a, b) {
+  if (!a.length && !b.length) return 1;
+  const blocks = [];
+  collectMatchingBlocks(a, b, 0, a.length, 0, b.length, blocks);
+  const matches = blocks.reduce((sum, k) => sum + k, 0);
+  return (2 * matches) / (a.length + b.length);
+}
+
+function normalizeForSimilarity(text) {
+  return (text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function normalizeDoi(doi) {
+  const t = trimDoi(doi || '');
+  return t ? t.toLowerCase() : '';
+}
+
+const SIMILARITY_THRESHOLD = 0.9; // bibdb dedup の既定閾値と揃える
+
+function findSimilarEntries(fields, existingEntries) {
+  const doi = normalizeDoi(fields.doi);
+  const normTitle = normalizeForSimilarity(fields.title || '');
+  const candidates = [];
+  for (const e of existingEntries) {
+    const eDoi = normalizeDoi(e.doi);
+    if (doi && eDoi && doi === eDoi) {
+      candidates.push({ entry: e, reason: 'DOI一致', score: 1 });
+      continue;
+    }
+    if (normTitle && e.title) {
+      const sim = sequenceRatio(normTitle, normalizeForSimilarity(e.title));
+      if (sim >= SIMILARITY_THRESHOLD) {
+        candidates.push({ entry: e, reason: `タイトル類似度 ${sim.toFixed(2)}`, score: sim });
+      }
+    }
+  }
+  return candidates.sort((a, b) => b.score - a.score).slice(0, 5);
+}
+
 // ─── DOI / Crossref ─────────────────────────────────────────────────────────────
 
 function trimDoi(d) {
@@ -659,6 +732,11 @@ const app = createApp({
       const key = (addParsed.value.cite_key || '').trim();
       if (!key) return null;
       return entries.value.some(e => e.cite_key === key) ? 'dup' : 'ok';
+    });
+
+    const similarEntries = computed(() => {
+      if (!addParsed.value) return [];
+      return findSimilarEntries(addParsed.value.fields, entries.value);
     });
 
     // ── Watchers ───────────────────────────────────────────────────────────
@@ -995,7 +1073,7 @@ const app = createApp({
       addMultiWarn, addCitekeyTouched, newAddFieldKey, newAddFieldVal,
       // computed
       searchResults, filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
-      fileExtras, addCitekeyStatus,
+      fileExtras, addCitekeyStatus, similarEntries,
       entryTags, availableTags,
       // methods
       selectEntry, toggleCheck, toggleAll, exportSelected,
@@ -1379,6 +1457,21 @@ const app = createApp({
             <button class="icon-btn" title="自動生成し直す" @click="regenAddCitekey">🔄</button>
             <span v-if="addCitekeyStatus === 'dup'" class="badge-dup">既存キーと衝突</span>
             <span v-else-if="addCitekeyStatus === 'ok'" class="badge-ok">OK（新規）</span>
+          </div>
+
+          <div class="similar-warning" v-if="similarEntries.length > 0">
+            <div class="similar-warning-label">
+              類似の登録が見つかりました（誤検出の可能性もあります。登録はブロックされません）
+            </div>
+            <div class="similar-item" v-for="c in similarEntries" :key="c.entry.cite_key">
+              <span class="similar-key">{{ c.entry.cite_key }}</span>
+              <span class="similar-title">{{ c.entry.title || '(no title)' }}</span>
+              <span class="similar-meta">
+                <template v-if="c.entry.author">{{ firstAuthor(c.entry.author) }}</template>
+                <template v-if="c.entry.year"> · {{ c.entry.year }}</template>
+              </span>
+              <span class="similar-reason">{{ c.reason }}</span>
+            </div>
           </div>
 
           <table class="kv-table">

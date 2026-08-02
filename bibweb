@@ -104,7 +104,8 @@ def list_entries(db_path):
                    MAX(CASE WHEN f.field_key = 'author'   THEN f.field_value END) AS author,
                    MAX(CASE WHEN f.field_key = 'year'     THEN f.field_value END) AS year,
                    MAX(CASE WHEN f.field_key = 'yomi'     THEN f.field_value END) AS yomi,
-                   MAX(CASE WHEN f.field_key = 'language' THEN f.field_value END) AS language
+                   MAX(CASE WHEN f.field_key = 'language' THEN f.field_value END) AS language,
+                   MAX(CASE WHEN f.field_key = 'doi'      THEN f.field_value END) AS doi
             FROM entries e
             LEFT JOIN fields f ON f.entry_id = e.id
             GROUP BY e.id
