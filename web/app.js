@@ -221,7 +221,207 @@ const api = {
       body: JSON.stringify({ keys, name }),
     });
   },
+  async createEntry(citeKey, entryType, fields) {
+    const r = await fetch('/api/entries', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cite_key: citeKey, entry_type: entryType, fields }),
+    });
+    let body = {};
+    try { body = await r.json(); } catch (_) { /* no body */ }
+    return { status: r.status, body };
+  },
 };
+
+// ─── BibTeX parsing (dependency-free; single entry) ───────────────────────────
+// 元は ingest-paper (ingest_paper.html) の同種ロジックを移植・拡張したもの。
+// bibweb は SQLite に直接書き込む設計のため、パースはここで完結させ bibtexparser には依存しない。
+
+function stripTex(s) {
+  return (s || '').replace(/\\[a-zA-Z]+/g, '').replace(/[{}\\~]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function foldAscii(s) {
+  return (s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]/g, '');
+}
+
+const CJK_RE = /[぀-ヿ㐀-鿿･-ﾟ]/;
+
+const CITEKEY_STOPWORDS = new Set(('a an the on of and or in for with to from at by into über under is are was were be been ' +
+  'do does did can could should would what when why how which who whom whose this that these those toward towards ' +
+  'some any all no not new note notes essay essays study studies evidence analysis approach').split(/\s+/));
+
+function splitBibFields(body) {
+  // "field = {...}, field2 = {...}" を波括弧の深さ・クォートを考慮してトップレベルのカンマで分割する
+  const pairs = [];
+  let depth = 0, inStr = false, start = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '"') inStr = !inStr;
+    else if (!inStr && c === '{') depth++;
+    else if (!inStr && c === '}') depth--;
+    else if (!inStr && depth === 0 && c === ',') {
+      pairs.push(body.slice(start, i));
+      start = i + 1;
+    }
+  }
+  const last = body.slice(start).trim();
+  if (last) pairs.push(last);
+  return pairs;
+}
+
+function parseBibValue(raw) {
+  const s = raw.trim();
+  if (s.startsWith('{')) {
+    let depth = 0, end = -1;
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === '{') depth++;
+      else if (s[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    return end >= 0 ? s.slice(1, end) : s;
+  }
+  if (s.startsWith('"')) {
+    const end = s.lastIndexOf('"');
+    return end > 0 ? s.slice(1, end) : s;
+  }
+  return s;
+}
+
+// 1エントリのみをパースする。先頭の @type{ から対応する閉じ波括弧までを見て、
+// それ以降に残ったテキストは tail として返す（複数エントリ貼り付けの検出用）。
+function parseBibEntry(text) {
+  const s = text.trim();
+  const head = /^@([a-zA-Z]+)\s*\{/.exec(s);
+  if (!head) return null;
+  const openIdx = head[0].length - 1;
+  let depth = 0, endIdx = -1;
+  for (let i = openIdx; i < s.length; i++) {
+    if (s[i] === '{') depth++;
+    else if (s[i] === '}') { depth--; if (depth === 0) { endIdx = i; break; } }
+  }
+  if (endIdx < 0) return null;
+  const inner = s.slice(openIdx + 1, endIdx);
+  const commaIdx = inner.indexOf(',');
+  if (commaIdx < 0) return null;
+  const citeKey = inner.slice(0, commaIdx).trim();
+  if (!citeKey) return null;
+  const fields = {};
+  for (const pair of splitBibFields(inner.slice(commaIdx + 1))) {
+    const eq = pair.indexOf('=');
+    if (eq < 0) continue;
+    const key = pair.slice(0, eq).trim().toLowerCase();
+    if (!key) continue;
+    fields[key] = parseBibValue(pair.slice(eq + 1)).trim();
+  }
+  return { entry_type: head[1].toLowerCase(), cite_key: citeKey, fields, tail: s.slice(endIdx + 1) };
+}
+
+// ─── Title Case ────────────────────────────────────────────────────────────────
+
+const TITLECASE_MINOR = new Set([
+  'a', 'an', 'the', 'and', 'but', 'or', 'nor', 'as', 'at', 'by', 'for', 'from',
+  'in', 'into', 'near', 'of', 'on', 'onto', 'per', 'to', 'with', 'up', 'via', 'vs',
+]);
+
+function capitalizeWord(w) {
+  return w.split('-').map(part =>
+    part.length ? part.charAt(0).toUpperCase() + part.slice(1).toLowerCase() : part
+  ).join('-');
+}
+
+// 単語ごとに先頭を大文字化する（冠詞・短い前置詞・等位接続詞は先頭/末尾以外なら小文字のまま）。
+// {...} で囲まれた区間（BibTeXの大文字小文字保護）は中身に触れずそのまま残す。
+function toTitleCase(title) {
+  if (!title) return title;
+  const parts = title.split(/(\{[^{}]*\})/g);
+  const wordRe = /[A-Za-z][A-Za-z'’]*/g;
+  let totalWords = 0;
+  for (const part of parts) {
+    if (part.startsWith('{')) continue;
+    totalWords += (part.match(wordRe) || []).length;
+  }
+  let seen = 0;
+  return parts.map(part => {
+    if (part.startsWith('{')) return part;
+    return part.replace(wordRe, (w) => {
+      seen++;
+      const lower = w.toLowerCase();
+      if (seen !== 1 && seen !== totalWords && TITLECASE_MINOR.has(lower)) return lower;
+      return capitalizeWord(w);
+    });
+  }).join('');
+}
+
+// ─── citekey 生成 ────────────────────────────────────────────────────────────────
+// 形式: {姓1}_{姓2}_..._{姓N}_{年}_{タイトル要約語}
+// 5名以上の共著は「第一著者_EtAl」に短縮。yomi があれば著者部分としてそれを優先使用
+// （bibweb の yomi はひらがな。無ければ author の生の文字＝漢字等をそのまま使う）。
+
+function authorSurname(name) {
+  const n = stripTex(name).trim();
+  if (!n) return '';
+  if (n.includes(',')) return n.split(',')[0].trim();
+  const parts = n.split(/\s+/);
+  return parts[parts.length - 1];
+}
+
+function citekeyAuthorSegment(fields) {
+  const yomi = (fields.yomi || '').trim();
+  if (yomi) return yomi.replace(/\s+/g, '');
+  const authorField = fields.author || '';
+  const authors = stripTex(authorField).split(/\s+and\s+/i).map(a => a.trim()).filter(Boolean);
+  if (!authors.length) return 'anon';
+  const surnames = authors.map(authorSurname).filter(Boolean);
+  if (!surnames.length) return 'anon';
+  const cleaned = surnames.map(s => CJK_RE.test(s) ? s : foldAscii(s)).filter(Boolean);
+  if (!cleaned.length) return 'anon';
+  if (cleaned.length > 4) return cleaned[0] + '_EtAl';
+  return cleaned.join('_');
+}
+
+function citekeyTitleWord(titleField) {
+  const raw = stripTex(titleField);
+  if (CJK_RE.test(raw)) {
+    return raw.replace(/[^぀-ヿ㐀-鿿･-ﾟA-Za-z0-9]+/g, '').slice(0, 8);
+  }
+  const words = raw.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  for (const w of words) {
+    if (w.length < 2) continue;
+    if (/^\d+$/.test(w)) continue;
+    if (CITEKEY_STOPWORDS.has(w)) continue;
+    return foldAscii(w);
+  }
+  return words.length ? foldAscii(words[0]) : '';
+}
+
+function makeCitekey(fields, existingKeys) {
+  const author = citekeyAuthorSegment(fields);
+  const yearRaw = stripTex(fields.year || '');
+  const year = (/\d{4}/.exec(yearRaw) || ['nd'])[0];
+  const word = citekeyTitleWord(fields.title || '');
+  const base = [author, year, word].filter(Boolean).join('_');
+  if (!existingKeys.has(base)) return base;
+  for (const c of 'abcdefghijklmnopqrstuvwxyz') {
+    const candidate = base + '_' + c;
+    if (!existingKeys.has(candidate)) return candidate;
+  }
+  return base + '_dup';
+}
+
+// ─── DOI / Crossref ─────────────────────────────────────────────────────────────
+
+function trimDoi(d) {
+  return (d || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').replace(/[.,;:)\]'"]+$/, '').trim();
+}
+
+async function fetchCrossrefBibtex(doiOrUrl) {
+  const doi = trimDoi(doiOrUrl);
+  if (!doi) throw new Error('DOI が空です');
+  const url = 'https://api.crossref.org/works/' + encodeURIComponent(doi) + '/transform/application/x-bibtex';
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('Crossref HTTP ' + r.status + (r.status === 404 ? '（DOI が見つかりません）' : ''));
+  return (await r.text()).trim();
+}
 
 // ─── Fuzzy search (fzf-style) ────────────────────────────────────────────────
 
@@ -343,6 +543,18 @@ const app = createApp({
     const newExtraKey      = ref('');
     const newExtraVal      = ref('');
 
+    // Add entry (新規登録)
+    const showAddEntry      = ref(false);
+    const addDoiInput       = ref('');
+    const addBibText        = ref('');
+    const addParsed         = ref(null);   // { entry_type, cite_key, fields: {...} }
+    const addBusy           = ref(false);
+    const addError          = ref('');
+    const addMultiWarn      = ref(false);
+    const addCitekeyTouched = ref(false);
+    const newAddFieldKey    = ref('');
+    const newAddFieldVal    = ref('');
+
     // ── Computed ───────────────────────────────────────────────────────────
 
     const searchResults = computed(() => {
@@ -441,6 +653,13 @@ const app = createApp({
     const fileExtras = computed(() =>
       (selectedEntry.value?.extras ?? []).filter(x => x.extra_key === 'file')
     );
+
+    const addCitekeyStatus = computed(() => {
+      if (!addParsed.value) return null;
+      const key = (addParsed.value.cite_key || '').trim();
+      if (!key) return null;
+      return entries.value.some(e => e.cite_key === key) ? 'dup' : 'ok';
+    });
 
     // ── Watchers ───────────────────────────────────────────────────────────
     watch(activeTab, (tab) => {
@@ -661,6 +880,101 @@ const app = createApp({
       await refreshEntry();
     }
 
+    // ── Methods: add entry (新規登録) ──────────────────────────────────────
+    function existingKeySet() {
+      return new Set(entries.value.map(e => e.cite_key));
+    }
+
+    function openAddEntry() {
+      showAddEntry.value = true;
+      addDoiInput.value = '';
+      addBibText.value = '';
+      addParsed.value = null;
+      addBusy.value = false;
+      addError.value = '';
+      addMultiWarn.value = false;
+      addCitekeyTouched.value = false;
+      newAddFieldKey.value = '';
+      newAddFieldVal.value = '';
+    }
+
+    function closeAddEntry() {
+      showAddEntry.value = false;
+    }
+
+    function parseAddBibText() {
+      addError.value = '';
+      addMultiWarn.value = false;
+      const text = addBibText.value;
+      if (!text.trim()) { addParsed.value = null; return; }
+      const parsed = parseBibEntry(text);
+      if (!parsed) {
+        addError.value = 'BibTeX として解釈できませんでした（@type{key, ... } の形式で貼り付けてください）';
+        addParsed.value = null;
+        return;
+      }
+      if (parsed.tail && parsed.tail.trim()) {
+        addMultiWarn.value = true;
+      }
+      const fields = { ...parsed.fields };
+      if (fields.title) fields.title = toTitleCase(fields.title);
+      const citeKey = (addCitekeyTouched.value && addParsed.value)
+        ? addParsed.value.cite_key
+        : makeCitekey(fields, existingKeySet());
+      addParsed.value = { entry_type: parsed.entry_type || 'misc', cite_key: citeKey, fields };
+    }
+
+    async function fetchDoiIntoBib() {
+      const doi = addDoiInput.value.trim();
+      if (!doi) return;
+      addBusy.value = true;
+      addError.value = '';
+      try {
+        addBibText.value = await fetchCrossrefBibtex(doi);
+        parseAddBibText();
+      } catch (e) {
+        addError.value = e.message;
+      } finally {
+        addBusy.value = false;
+      }
+    }
+
+    function regenAddCitekey() {
+      if (!addParsed.value) return;
+      addParsed.value.cite_key = makeCitekey(addParsed.value.fields, existingKeySet());
+      addCitekeyTouched.value = false;
+    }
+
+    function removeAddField(key) {
+      if (!addParsed.value) return;
+      delete addParsed.value.fields[key];
+    }
+
+    function addAddField() {
+      const key = newAddFieldKey.value.trim().toLowerCase();
+      if (!key || !addParsed.value) return;
+      addParsed.value.fields[key] = newAddFieldVal.value;
+      newAddFieldKey.value = '';
+      newAddFieldVal.value = '';
+    }
+
+    async function submitAddEntry() {
+      if (!addParsed.value) return;
+      const citeKey = (addParsed.value.cite_key || '').trim();
+      if (!citeKey) { addError.value = 'citekey を入力してください'; return; }
+      addBusy.value = true;
+      addError.value = '';
+      const { status, body } = await api.createEntry(citeKey, addParsed.value.entry_type || 'misc', addParsed.value.fields);
+      addBusy.value = false;
+      if (status >= 300 || body.error) {
+        addError.value = body.error || `登録に失敗しました (HTTP ${status})`;
+        return;
+      }
+      showAddEntry.value = false;
+      await loadEntries();
+      await selectEntry(citeKey);
+    }
+
     // ── Init ───────────────────────────────────────────────────────────────
     onMounted(async () => {
       const db = await api.getDb();
@@ -677,9 +991,11 @@ const app = createApp({
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
+      showAddEntry, addDoiInput, addBibText, addParsed, addBusy, addError,
+      addMultiWarn, addCitekeyTouched, newAddFieldKey, newAddFieldVal,
       // computed
       searchResults, filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
-      fileExtras,
+      fileExtras, addCitekeyStatus,
       entryTags, availableTags,
       // methods
       selectEntry, toggleCheck, toggleAll, exportSelected,
@@ -688,6 +1004,8 @@ const app = createApp({
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
       exportSelectedDb,
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
+      openAddEntry, closeAddEntry, parseAddBibText, fetchDoiIntoBib,
+      regenAddCitekey, removeAddField, addAddField, submitAddEntry,
       // helpers exposed to template
       mdKeyLabel, fileLabel, firstAuthor,
       // scroll memory refs
@@ -700,7 +1018,10 @@ const app = createApp({
 
   <!-- Header -->
   <header class="header">
-    <span class="header-title">bibweb</span>
+    <div class="header-left">
+      <span class="header-title">bibweb</span>
+      <button class="btn-add-entry" @click="openAddEntry">＋ 新規登録</button>
+    </div>
     <span class="header-db" :title="dbPath">{{ dbPath }}</span>
   </header>
 
@@ -1012,6 +1333,91 @@ const app = createApp({
       <div class="empty-message">← エントリを選択してください</div>
     </main>
 
+  </div>
+
+  <!-- ── Add entry modal ── -->
+  <div v-if="showAddEntry" class="modal-overlay" @click.self="closeAddEntry">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2>新規文献の登録</h2>
+        <button class="modal-close" @click="closeAddEntry" title="閉じる">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="add-entry-section">
+          <div class="info-section-label">DOI から取得</div>
+          <div class="doi-fetch-row">
+            <input v-model="addDoiInput" class="doi-input"
+                   placeholder="DOI または https://doi.org/... を貼り付け"
+                   @keydown.enter.prevent="fetchDoiIntoBib">
+            <button class="btn btn-save" :disabled="addBusy || !addDoiInput.trim()"
+                    @click="fetchDoiIntoBib">
+              {{ addBusy ? '取得中…' : 'Crossref から取得' }}
+            </button>
+          </div>
+        </div>
+
+        <div class="add-entry-section">
+          <div class="info-section-label">BibTeX（1件のみ）</div>
+          <textarea v-model="addBibText" class="edit-textarea add-bib-textarea" rows="8"
+                    placeholder="@article{key, title={...}, author={Last, First and ...}, year={2026}, ...}"
+                    @input="parseAddBibText"></textarea>
+          <p v-if="addMultiWarn" class="warn-hint">
+            複数エントリが検出されました。最初の1件のみ使用します（複数登録は bibdb を使ってください）。
+          </p>
+        </div>
+
+        <p v-if="addError" class="error-hint">{{ addError }}</p>
+
+        <div class="add-entry-section" v-if="addParsed">
+          <div class="info-section-label">プレビュー</div>
+
+          <div class="citekey-row">
+            <span class="kv-key">citekey</span>
+            <input v-model="addParsed.cite_key" class="add-key-input citekey-input"
+                   @input="addCitekeyTouched = true">
+            <button class="icon-btn" title="自動生成し直す" @click="regenAddCitekey">🔄</button>
+            <span v-if="addCitekeyStatus === 'dup'" class="badge-dup">既存キーと衝突</span>
+            <span v-else-if="addCitekeyStatus === 'ok'" class="badge-ok">OK（新規）</span>
+          </div>
+
+          <table class="kv-table">
+            <tbody>
+              <tr>
+                <td class="kv-key">entry_type</td>
+                <td class="kv-value"><input v-model="addParsed.entry_type" class="add-key-input"></td>
+              </tr>
+              <tr v-for="(val, key) in addParsed.fields" :key="key">
+                <td class="kv-key">{{ key }}</td>
+                <td class="kv-value">
+                  <textarea v-model="addParsed.fields[key]" class="edit-textarea" rows="2"></textarea>
+                  <div class="row-actions">
+                    <button class="icon-btn" title="削除" @click="removeAddField(key)">🗑️</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="add-form">
+            <input v-model="newAddFieldKey" placeholder="field_key" class="add-key-input"
+                   @keydown.enter.prevent="addAddField">
+            <textarea v-model="newAddFieldVal" placeholder="値" class="add-value-input" rows="2"
+                      @keydown.ctrl.enter="addAddField" @keydown.meta.enter="addAddField"></textarea>
+            <button @click="addAddField" class="btn btn-save">フィールド追加</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-cancel" @click="closeAddEntry">キャンセル</button>
+        <button class="btn btn-save"
+                :disabled="!addParsed || addBusy || addCitekeyStatus === 'dup' || !addParsed.cite_key.trim()"
+                @click="submitAddEntry">
+          {{ addBusy ? '登録中…' : '登録' }}
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 `,
