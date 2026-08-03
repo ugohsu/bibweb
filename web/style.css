@@ -1137,8 +1137,8 @@ body {
 
 .figure-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+  gap: 16px;
 }
 
 .figure-card {
@@ -1152,7 +1152,7 @@ body {
 
 .figure-thumb {
   width: 100%;
-  max-height: 220px;
+  max-height: 640px;
   object-fit: contain;
   background: #f5f5f5;
   cursor: zoom-in;

@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import base64
+import io
 import json
 import os
 import re
@@ -20,6 +21,12 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, unquote
+
+try:
+    from PIL import Image
+    _HAS_PILLOW = True
+except ImportError:
+    _HAS_PILLOW = False
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -360,6 +367,30 @@ def add_extra(db_path, cite_key, extra_key, extra_value):
             (entry["id"], extra_key, extra_value)
         )
         return True
+
+
+def _quantize_image(image_bytes):
+    """図表メモの画像を PNG パレット削減する（リサイズはしない）。
+    文字・罫線中心のスクリーンショットは色数がもともと少なく、パレット化するだけで
+    大きく縮む一方、視覚的な劣化はほぼ生じない（実測: 780x761 の論文の表画像で
+    140KB→43KB、目視で無劣化）。Pillow が無い場合や、かえって大きくなる場合は
+    元のバイト列をそのまま返す。"""
+    if not _HAS_PILLOW:
+        return image_bytes, None
+    try:
+        im = Image.open(io.BytesIO(image_bytes))
+        im.load()
+        has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+        src = im.convert("RGBA") if has_alpha else im.convert("RGB")
+        quantized = src.quantize(colors=256)
+        buf = io.BytesIO()
+        quantized.save(buf, format="PNG", optimize=True)
+        new_bytes = buf.getvalue()
+    except Exception:
+        return image_bytes, None
+    if len(new_bytes) < len(image_bytes):
+        return new_bytes, "image/png"
+    return image_bytes, None
 
 
 def list_figure_notes(db_path, cite_key):
@@ -738,7 +769,8 @@ class BibWebHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error_json(409, err)
 
-        # POST /api/entries/{key}/figures — add a figure/table note (image is base64, uncompressed)
+        # POST /api/entries/{key}/figures — add a figure/table note
+        # 画像はリサイズせず、PNG パレット削減のみ行って保存する（_quantize_image 参照）。
         elif len(parts) == 5 and parts[4] == "figures":
             cite_key = unquote(parts[3])
             body = self.read_json_body()
@@ -751,10 +783,14 @@ class BibWebHandler(BaseHTTPRequestHandler):
             except Exception:
                 self.send_error_json(400, "image_base64 のデコードに失敗しました")
                 return
+            image_mime = body.get("image_mime") or "application/octet-stream"
+            image_bytes, quantized_mime = _quantize_image(image_bytes)
+            if quantized_mime:
+                image_mime = quantized_mime
             ok, note_id = add_figure_note(
                 self.db_path, cite_key,
                 body.get("label") or "", body.get("memo") or "",
-                image_bytes, body.get("image_mime") or "application/octet-stream"
+                image_bytes, image_mime
             )
             if ok:
                 self.send_json({"ok": True, "id": note_id}, status=201)
