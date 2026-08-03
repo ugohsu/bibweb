@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -185,7 +186,38 @@ CREATE TABLE extras (
     extra_key   TEXT    NOT NULL,
     extra_value TEXT
 );
+CREATE TABLE figure_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    label       TEXT,
+    memo        TEXT,
+    image_data  BLOB,
+    image_mime  TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 """
+
+def ensure_figure_notes_table(db_path):
+    """figure_notes 追加より前に作られた DB にもテーブルを追加する（bibdb の init_db と同一定義）。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS figure_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                label TEXT,
+                memo TEXT,
+                image_data BLOB,
+                image_mime TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
 
 def export_db(db_path, cite_keys):
     fd, tmp = tempfile.mkstemp(suffix=".db")
@@ -219,6 +251,18 @@ def export_db(db_path, cite_keys):
                         dst.execute(
                             "INSERT INTO extras (entry_id, extra_key, extra_value) VALUES (?, ?, ?)",
                             (row["id"], x["extra_key"], x["extra_value"])
+                        )
+                    for fn in src.execute(
+                        "SELECT label, memo, image_data, image_mime, sort_order, created_at "
+                        "FROM figure_notes WHERE entry_id = ? ORDER BY sort_order, id",
+                        (row["id"],)
+                    ).fetchall():
+                        dst.execute(
+                            "INSERT INTO figure_notes "
+                            "(entry_id, label, memo, image_data, image_mime, sort_order, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (row["id"], fn["label"], fn["memo"], fn["image_data"],
+                             fn["image_mime"], fn["sort_order"], fn["created_at"])
                         )
         with open(tmp, "rb") as f:
             return f.read()
@@ -315,6 +359,81 @@ def add_extra(db_path, cite_key, extra_key, extra_value):
             "INSERT INTO extras (entry_id, extra_key, extra_value) VALUES (?, ?, ?)",
             (entry["id"], extra_key, extra_value)
         )
+        return True
+
+
+def list_figure_notes(db_path, cite_key):
+    with get_conn(db_path) as conn:
+        entry = conn.execute(
+            "SELECT id FROM entries WHERE cite_key = ?", (cite_key,)
+        ).fetchone()
+        if not entry:
+            return None
+        rows = conn.execute(
+            "SELECT id, label, memo, image_mime, sort_order, created_at, "
+            "(image_data IS NOT NULL) AS has_image "
+            "FROM figure_notes WHERE entry_id = ? ORDER BY sort_order, id",
+            (entry["id"],)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_figure_image(db_path, note_id):
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT image_data, image_mime FROM figure_notes WHERE id = ?", (note_id,)
+        ).fetchone()
+        if not row or row["image_data"] is None:
+            return None, None
+        return row["image_data"], row["image_mime"]
+
+
+def add_figure_note(db_path, cite_key, label, memo, image_bytes, image_mime):
+    with get_conn(db_path) as conn:
+        entry = conn.execute(
+            "SELECT id FROM entries WHERE cite_key = ?", (cite_key,)
+        ).fetchone()
+        if not entry:
+            return False, None
+        max_order = conn.execute(
+            "SELECT MAX(sort_order) FROM figure_notes WHERE entry_id = ?", (entry["id"],)
+        ).fetchone()[0]
+        next_order = (max_order + 1) if max_order is not None else 0
+        cur = conn.execute(
+            "INSERT INTO figure_notes (entry_id, label, memo, image_data, image_mime, sort_order) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (entry["id"], label, memo, image_bytes, image_mime, next_order)
+        )
+        return True, cur.lastrowid
+
+
+def update_figure_note(db_path, note_id, label, memo):
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE figure_notes SET label = ?, memo = ? WHERE id = ?",
+            (label, memo, note_id)
+        )
+        return True
+
+
+def delete_figure_note(db_path, note_id):
+    with get_conn(db_path) as conn:
+        conn.execute("DELETE FROM figure_notes WHERE id = ?", (note_id,))
+        return True
+
+
+def reorder_figure_notes(db_path, cite_key, ordered_ids):
+    with get_conn(db_path) as conn:
+        entry = conn.execute(
+            "SELECT id FROM entries WHERE cite_key = ?", (cite_key,)
+        ).fetchone()
+        if not entry:
+            return False
+        for idx, note_id in enumerate(ordered_ids):
+            conn.execute(
+                "UPDATE figure_notes SET sort_order = ? WHERE id = ? AND entry_id = ?",
+                (idx, note_id, entry["id"])
+            )
         return True
 
 
@@ -501,6 +620,37 @@ class BibWebHandler(BaseHTTPRequestHandler):
                     self.send_json(entry)
                 else:
                     self.send_error_json(404, "Entry not found")
+            # /api/entries/{key}/figures
+            elif len(parts) == 5 and parts[4] == "figures":
+                cite_key = unquote(parts[3])
+                figures = list_figure_notes(self.db_path, cite_key)
+                if figures is None:
+                    self.send_error_json(404, "Entry not found")
+                else:
+                    self.send_json(figures)
+            else:
+                self.send_error_json(404, "Not found")
+
+        # GET /api/figures/{id}/image
+        elif path.startswith("/api/figures/"):
+            parts = path.split("/")
+            if len(parts) == 5 and parts[4] == "image":
+                try:
+                    note_id = int(parts[3])
+                except ValueError:
+                    self.send_error_json(400, "Invalid id")
+                    return
+                image_data, image_mime = get_figure_image(self.db_path, note_id)
+                if image_data is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", image_mime or "application/octet-stream")
+                self.send_header("Content-Length", str(len(image_data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(image_data)
             else:
                 self.send_error_json(404, "Not found")
 
@@ -588,6 +738,29 @@ class BibWebHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error_json(409, err)
 
+        # POST /api/entries/{key}/figures — add a figure/table note (image is base64, uncompressed)
+        elif len(parts) == 5 and parts[4] == "figures":
+            cite_key = unquote(parts[3])
+            body = self.read_json_body()
+            image_b64 = body.get("image_base64") or ""
+            if not image_b64:
+                self.send_error_json(400, "image_base64 が空です")
+                return
+            try:
+                image_bytes = base64.b64decode(image_b64)
+            except Exception:
+                self.send_error_json(400, "image_base64 のデコードに失敗しました")
+                return
+            ok, note_id = add_figure_note(
+                self.db_path, cite_key,
+                body.get("label") or "", body.get("memo") or "",
+                image_bytes, body.get("image_mime") or "application/octet-stream"
+            )
+            if ok:
+                self.send_json({"ok": True, "id": note_id}, status=201)
+            else:
+                self.send_error_json(404, "Entry not found")
+
         else:
             self.send_error_json(404, "Not found")
 
@@ -612,6 +785,24 @@ class BibWebHandler(BaseHTTPRequestHandler):
                 return
             body = self.read_json_body()
             ok = update_extra(self.db_path, extra_id, body.get("extra_value", ""))
+            self.send_json({"ok": ok})
+
+        # PUT /api/entries/{key}/figures/order — reorder (body: {ids: [...]})
+        elif len(parts) == 6 and parts[2] == "entries" and parts[4] == "figures" and parts[5] == "order":
+            cite_key = unquote(parts[3])
+            body = self.read_json_body()
+            ok = reorder_figure_notes(self.db_path, cite_key, body.get("ids", []))
+            self.send_json({"ok": ok})
+
+        # PUT /api/figures/{id}
+        elif len(parts) == 4 and parts[2] == "figures":
+            try:
+                note_id = int(parts[3])
+            except ValueError:
+                self.send_error_json(400, "Invalid id")
+                return
+            body = self.read_json_body()
+            ok = update_figure_note(self.db_path, note_id, body.get("label") or "", body.get("memo") or "")
             self.send_json({"ok": ok})
 
         else:
@@ -645,6 +836,16 @@ class BibWebHandler(BaseHTTPRequestHandler):
             ok = delete_tag(self.db_path, cite_key, tag_name)
             self.send_json({"ok": ok})
 
+        # DELETE /api/figures/{id}
+        elif len(parts) == 4 and parts[2] == "figures":
+            try:
+                note_id = int(parts[3])
+            except ValueError:
+                self.send_error_json(400, "Invalid id")
+                return
+            ok = delete_figure_note(self.db_path, note_id)
+            self.send_json({"ok": ok})
+
         else:
             self.send_error_json(404, "Not found")
 
@@ -668,6 +869,9 @@ def main():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
         print("Set $BIBDB_PATH or pass a path as argument.", file=sys.stderr)
         sys.exit(1)
+
+    # 図表メモ機能: 既存 DB にも figure_notes テーブルを用意する
+    ensure_figure_notes_table(db_path)
 
     # Download UI files on first run
     if not all((CACHE_DIR / f).exists() for f in REPO_FILES):

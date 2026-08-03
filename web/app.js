@@ -214,6 +214,34 @@ const api = {
       method: 'DELETE',
     });
   },
+  async getFigures(citeKey) {
+    return (await fetch(`/api/entries/${encodeURIComponent(citeKey)}/figures`)).json();
+  },
+  async addFigure(citeKey, { label, memo, image_base64, image_mime }) {
+    const r = await fetch(`/api/entries/${encodeURIComponent(citeKey)}/figures`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, memo, image_base64, image_mime }),
+    });
+    return r.json();
+  },
+  async updateFigure(id, label, memo) {
+    return fetch(`/api/figures/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, memo }),
+    });
+  },
+  async deleteFigure(id) {
+    return fetch(`/api/figures/${id}`, { method: 'DELETE' });
+  },
+  async reorderFigures(citeKey, ids) {
+    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/figures/order`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+  },
   async bulkAddTag(keys, name) {
     return fetch('/api/tags/bulk', {
       method: 'POST',
@@ -616,6 +644,15 @@ const app = createApp({
     const newExtraKey      = ref('');
     const newExtraVal      = ref('');
 
+    // 図表メモ (Figures タブ)
+    const figures             = ref([]);   // 選択中エントリの図表メモ一覧（sort_order順）
+    const figureBusy          = ref(false);
+    const figuresPanelRef     = ref(null);
+    const editingFigureId     = ref(null);
+    const editingFigureLabel  = ref('');
+    const editingFigureMemo   = ref('');
+    const lightboxFigureId    = ref(null);
+
     // Add entry (新規登録)
     const showAddEntry      = ref(false);
     const addDoiInput       = ref('');
@@ -744,6 +781,10 @@ const app = createApp({
       if (tab === 'markdown' && !activeMdKey.value && mdExtras.value.length > 0) {
         activeMdKey.value = mdExtras.value[0].id;
       }
+      if (tab === 'figures') {
+        // ペーストゾーンにフォーカスして、タブを開いたらすぐ Ctrl+V できるようにする
+        nextTick(() => figuresPanelRef.value?.focus());
+      }
     });
 
     // ── Methods: navigation ────────────────────────────────────────────────
@@ -762,11 +803,13 @@ const app = createApp({
       selectedEntry.value = await api.getEntry(key);
       activeTab.value = 'info';
       resetEditing();
+      cancelFigureEdit();
       if (mdExtras.value.length > 0) {
         activeMdKey.value = mdExtras.value[0].id;
       } else {
         activeMdKey.value = null;
       }
+      await loadFigures();
       await nextTick();
       if (digestPanelRef.value) {
         digestPanelRef.value.scrollTop = digestScrollMap.get(key) ?? 0;
@@ -958,6 +1001,107 @@ const app = createApp({
       await refreshEntry();
     }
 
+    // ── Methods: 図表メモ (Figures タブ) ───────────────────────────────────
+    function figureImageUrl(id) {
+      return `/api/figures/${id}/image`;
+    }
+
+    async function loadFigures() {
+      figures.value = selectedEntry.value
+        ? await api.getFigures(selectedEntry.value.cite_key)
+        : [];
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function uploadFigureBlob(blob) {
+      if (!selectedEntry.value || !blob) return;
+      figureBusy.value = true;
+      try {
+        const image_base64 = await blobToBase64(blob);
+        await api.addFigure(selectedEntry.value.cite_key, {
+          label: '', memo: '',
+          image_base64,
+          image_mime: blob.type || 'application/octet-stream',
+        });
+        await loadFigures();
+      } finally {
+        figureBusy.value = false;
+      }
+    }
+
+    function handleFigurePaste(event) {
+      const items = event.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type && item.type.startsWith('image/')) {
+          event.preventDefault();
+          uploadFigureBlob(item.getAsFile());
+          return;
+        }
+      }
+    }
+
+    function handleFigureDrop(event) {
+      const file = event.dataTransfer?.files?.[0];
+      if (file && file.type.startsWith('image/')) uploadFigureBlob(file);
+    }
+
+    function handleFigureFileInput(event) {
+      const file = event.target.files?.[0];
+      if (file) uploadFigureBlob(file);
+      event.target.value = '';
+    }
+
+    function startEditFigure(fig) {
+      editingFigureId.value    = fig.id;
+      editingFigureLabel.value = fig.label || '';
+      editingFigureMemo.value  = fig.memo || '';
+    }
+
+    function cancelFigureEdit() {
+      editingFigureId.value    = null;
+      editingFigureLabel.value = '';
+      editingFigureMemo.value  = '';
+    }
+
+    async function saveFigureEdit() {
+      await api.updateFigure(editingFigureId.value, editingFigureLabel.value, editingFigureMemo.value);
+      cancelFigureEdit();
+      await loadFigures();
+    }
+
+    async function deleteFigureNote(id) {
+      if (!confirm('この図表メモを削除しますか？')) return;
+      await api.deleteFigure(id);
+      if (lightboxFigureId.value === id) lightboxFigureId.value = null;
+      await loadFigures();
+    }
+
+    async function moveFigure(idx, dir) {
+      const newIdx = idx + dir;
+      if (newIdx < 0 || newIdx >= figures.value.length) return;
+      const arr = [...figures.value];
+      [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+      figures.value = arr;
+      await api.reorderFigures(selectedEntry.value.cite_key, arr.map(f => f.id));
+    }
+
+    function openFigureLightbox(id) {
+      lightboxFigureId.value = id;
+    }
+
+    function closeFigureLightbox() {
+      lightboxFigureId.value = null;
+    }
+
     // ── Methods: add entry (新規登録) ──────────────────────────────────────
     function existingKeySet() {
       return new Set(entries.value.map(e => e.cite_key));
@@ -1071,6 +1215,8 @@ const app = createApp({
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
       showAddEntry, addDoiInput, addBibText, addParsed, addBusy, addError,
       addMultiWarn, addCitekeyTouched, newAddFieldKey, newAddFieldVal,
+      figures, figureBusy, editingFigureId, editingFigureLabel, editingFigureMemo,
+      lightboxFigureId,
       // computed
       searchResults, filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
       fileExtras, addCitekeyStatus, similarEntries,
@@ -1084,10 +1230,13 @@ const app = createApp({
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       openAddEntry, closeAddEntry, parseAddBibText, fetchDoiIntoBib,
       regenAddCitekey, removeAddField, addAddField, submitAddEntry,
+      figureImageUrl, handleFigurePaste, handleFigureDrop, handleFigureFileInput,
+      startEditFigure, cancelFigureEdit, saveFigureEdit, deleteFigureNote, moveFigure,
+      openFigureLightbox, closeFigureLightbox,
       // helpers exposed to template
       mdKeyLabel, fileLabel, firstAuthor,
       // scroll memory refs
-      digestPanelRef,
+      digestPanelRef, figuresPanelRef,
     };
   },
 
@@ -1229,6 +1378,11 @@ const app = createApp({
           Info
           <span class="tab-count">{{ selectedEntry.fields.length }}</span>
         </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'figures' }"
+                @click="activeTab = 'figures'">
+          図表
+          <span class="tab-count">{{ figures.length }}</span>
+        </button>
         <button class="tab-btn" :class="{ active: activeTab === 'markdown' }"
                 @click="activeTab = 'markdown'"
                 v-if="mdExtras.length > 0">
@@ -1338,6 +1492,55 @@ const app = createApp({
         </div>
       </div>
 
+      <!-- ── Figures tab (図表メモ) ── -->
+      <div v-show="activeTab === 'figures'" class="tab-content tab-content-figures"
+           tabindex="0" ref="figuresPanelRef"
+           @paste="handleFigurePaste" @dragover.prevent @drop.prevent="handleFigureDrop">
+
+        <div class="figure-paste-zone">
+          <span>画像をペースト (Ctrl+V) またはドラッグ&ドロップ</span>
+          <label class="btn btn-add figure-file-label">
+            ファイルを選択
+            <input type="file" accept="image/*" class="figure-file-input"
+                   @change="handleFigureFileInput">
+          </label>
+          <span v-if="figureBusy" class="figure-uploading">アップロード中…</span>
+        </div>
+
+        <div class="figure-list" v-if="figures.length > 0">
+          <div class="figure-card" v-for="(fig, idx) in figures" :key="fig.id">
+            <img :src="figureImageUrl(fig.id)" class="figure-thumb"
+                 @click="openFigureLightbox(fig.id)" alt="">
+            <div class="figure-body">
+              <template v-if="editingFigureId === fig.id">
+                <input v-model="editingFigureLabel" class="add-key-input"
+                       placeholder="ラベル 例: Fig. 3 / Table 2">
+                <textarea v-model="editingFigureMemo" class="edit-textarea" rows="3"
+                          placeholder="メモ"
+                          @keydown.ctrl.enter="saveFigureEdit" @keydown.meta.enter="saveFigureEdit"></textarea>
+                <div class="edit-actions">
+                  <button @click="saveFigureEdit" class="btn btn-save">保存</button>
+                  <button @click="cancelFigureEdit" class="btn btn-cancel">キャンセル</button>
+                </div>
+              </template>
+              <template v-else>
+                <div class="figure-label">{{ fig.label || '(ラベルなし)' }}</div>
+                <div class="figure-memo">{{ fig.memo }}</div>
+              </template>
+            </div>
+            <div class="figure-actions" v-if="editingFigureId !== fig.id">
+              <button class="icon-btn" title="上へ" :disabled="idx === 0"
+                      @click="moveFigure(idx, -1)">↑</button>
+              <button class="icon-btn" title="下へ" :disabled="idx === figures.length - 1"
+                      @click="moveFigure(idx, 1)">↓</button>
+              <button class="icon-btn" title="編集" @click="startEditFigure(fig)">✏️</button>
+              <button class="icon-btn" title="削除" @click="deleteFigureNote(fig.id)">🗑️</button>
+            </div>
+          </div>
+        </div>
+        <p v-else class="empty-hint">まだ図表メモがありません。上の枠に画像をペーストしてください。</p>
+      </div>
+
       <!-- ── Extras tab ── -->
       <div v-show="activeTab === 'extras'" class="tab-content">
         <table class="kv-table" v-if="otherExtras.length > 0">
@@ -1411,6 +1614,12 @@ const app = createApp({
       <div class="empty-message">← エントリを選択してください</div>
     </main>
 
+  </div>
+
+  <!-- ── Figure lightbox ── -->
+  <div v-if="lightboxFigureId" class="modal-overlay figure-lightbox-overlay" @click.self="closeFigureLightbox">
+    <img :src="figureImageUrl(lightboxFigureId)" class="figure-lightbox-img" alt="">
+    <button class="modal-close figure-lightbox-close" @click="closeFigureLightbox" title="閉じる">✕</button>
   </div>
 
   <!-- ── Add entry modal ── -->
