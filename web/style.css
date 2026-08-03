@@ -1136,8 +1136,8 @@ body {
 .figure-uploading { color: #1565c0; font-weight: 500; }
 
 .figure-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 16px;
 }
 
