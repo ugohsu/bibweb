@@ -1380,7 +1380,7 @@ const app = createApp({
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'figures' }"
                 @click="activeTab = 'figures'">
-          図表
+          Exhibits
           <span class="tab-count">{{ figures.length }}</span>
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'markdown' }"
