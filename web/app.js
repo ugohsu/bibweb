@@ -644,6 +644,15 @@ const app = createApp({
     const newExtraKey      = ref('');
     const newExtraVal      = ref('');
 
+    // Info タブ: md.* クイック追加
+    const showMdAdd  = ref(false);
+    const mdAddKey   = ref('md.digest');
+    const mdAddVal   = ref('');
+    const mdAddBusy  = ref(false);
+
+    // Info タブ: ファイルリンク追加
+    const newFileUrl = ref('');
+
     // 図表メモ (Figures タブ)
     const figures             = ref([]);   // 選択中エントリの図表メモ一覧（sort_order順）
     const figureBusy          = ref(false);
@@ -835,6 +844,10 @@ const app = createApp({
       showNewExtra.value     = false;
       newExtraKey.value      = '';
       newExtraVal.value      = '';
+      showMdAdd.value        = false;
+      mdAddKey.value         = 'md.digest';
+      mdAddVal.value         = '';
+      newFileUrl.value       = '';
     }
 
     function toggleFieldsEditMode() {
@@ -998,6 +1011,85 @@ const app = createApp({
       newExtraKey.value  = '';
       newExtraVal.value  = '';
       showNewExtra.value = false;
+      await refreshEntry();
+    }
+
+    // ── Methods: Info タブ md.* クイック追加 ───────────────────────────────
+    // md.* は「同じ key は1つだけ」という運用を前提にしたUIなので、既存行が
+    // あれば常に上書き（update）する。tags/file のように複数値を持たせたい
+    // 場合は Extras タブから直接編集する。
+    function existingMdExtra(key) {
+      return (selectedEntry.value?.extras ?? []).find(x => x.extra_key === key);
+    }
+
+    function startMdAdd() {
+      showMdAdd.value = true;
+      mdAddKey.value   = 'md.digest';
+      mdAddVal.value   = '';
+    }
+
+    function cancelMdAdd() {
+      showMdAdd.value = false;
+      mdAddKey.value   = 'md.digest';
+      mdAddVal.value   = '';
+    }
+
+    function readTextFile(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsText(file);
+      });
+    }
+
+    async function handleMdFileInput(event) {
+      const file = event.target.files?.[0];
+      event.target.value = '';  // 同じファイルを選び直せるようにする
+      if (!file) return;
+      mdAddVal.value = await readTextFile(file);
+    }
+
+    async function saveMdExtra() {
+      const key = mdAddKey.value.trim();
+      if (!key.startsWith('md.')) {
+        alert('extra_key は "md." で始まる必要があります（例: md.digest）。');
+        return;
+      }
+      if (!mdAddVal.value) return;
+      mdAddBusy.value = true;
+      try {
+        const existing = existingMdExtra(key);
+        if (existing) {
+          await api.updateExtra(existing.id, mdAddVal.value);
+        } else {
+          await api.addExtra(selectedEntry.value.cite_key, key, mdAddVal.value);
+        }
+        cancelMdAdd();
+        await refreshEntry();
+      } finally {
+        mdAddBusy.value = false;
+      }
+    }
+
+    // ── Methods: Info タブ ファイルリンク追加/削除 ─────────────────────────
+    // file は md.* と逆に「複数値を持たせたい」キーなので、常に追加のみ行う
+    // （既存リンクの書き換えは Extras タブから行う）。
+    async function addFileLink() {
+      const url = newFileUrl.value.trim();
+      if (!url) return;
+      if (!/^https?:\/\//i.test(url)) {
+        alert('ファイルリンクは http:// または https:// で始まる URL を指定してください。');
+        return;
+      }
+      await api.addExtra(selectedEntry.value.cite_key, 'file', url);
+      newFileUrl.value = '';
+      await refreshEntry();
+    }
+
+    async function removeFileLink(id) {
+      if (!confirm('このファイルリンクを削除しますか？')) return;
+      await api.deleteExtra(id);
       await refreshEntry();
     }
 
@@ -1213,6 +1305,7 @@ const app = createApp({
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
+      showMdAdd, mdAddKey, mdAddVal, mdAddBusy, newFileUrl,
       showAddEntry, addDoiInput, addBibText, addParsed, addBusy, addError,
       addMultiWarn, addCitekeyTouched, newAddFieldKey, newAddFieldVal,
       figures, figureBusy, editingFigureId, editingFigureLabel, editingFigureMemo,
@@ -1226,6 +1319,8 @@ const app = createApp({
       toggleFieldsEditMode, fieldsEditMode,
       startEditField, cancelEditField, saveField, deleteField, addField,
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
+      existingMdExtra, startMdAdd, cancelMdAdd, handleMdFileInput, saveMdExtra,
+      addFileLink, removeFileLink,
       exportSelectedDb,
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       openAddEntry, closeAddEntry, parseAddBibText, fetchDoiIntoBib,
@@ -1234,7 +1329,7 @@ const app = createApp({
       startEditFigure, cancelFigureEdit, saveFigureEdit, deleteFigureNote, moveFigure,
       openFigureLightbox, closeFigureLightbox,
       // helpers exposed to template
-      mdKeyLabel, fileLabel, firstAuthor,
+      mdKeyLabel, fileLabel, firstAuthor, MD_KEY_LABELS,
       // scroll memory refs
       digestPanelRef, figuresPanelRef,
     };
@@ -1471,16 +1566,53 @@ const app = createApp({
             </div>
           </div>
 
+          <!-- Markdown (md.*) quick-add section -->
+          <div class="info-section">
+            <div class="info-section-label">Markdown</div>
+            <div v-if="showMdAdd" class="add-form">
+              <input v-model="mdAddKey" list="md-key-datalist"
+                     placeholder="extra_key 例: md.digest" class="add-key-input">
+              <datalist id="md-key-datalist">
+                <option v-for="k in Object.keys(MD_KEY_LABELS)" :key="k" :value="k"></option>
+              </datalist>
+              <textarea v-model="mdAddVal" placeholder="内容を貼り付け、または下のボタンでファイルから読み込み"
+                        class="add-value-input" rows="6"
+                        @keydown.ctrl.enter="saveMdExtra" @keydown.meta.enter="saveMdExtra"></textarea>
+              <label class="btn btn-add figure-file-label" style="align-self: flex-start;">
+                ファイルから読み込む
+                <input type="file" accept=".md,.markdown,.txt,text/*" class="figure-file-input"
+                       @change="handleMdFileInput">
+              </label>
+              <div class="edit-actions">
+                <button @click="saveMdExtra" class="btn btn-save" :disabled="mdAddBusy">
+                  {{ existingMdExtra(mdAddKey.trim()) ? '上書き保存' : '追加' }}
+                </button>
+                <button @click="cancelMdAdd" class="btn btn-cancel">キャンセル</button>
+              </div>
+              <p v-if="existingMdExtra(mdAddKey.trim())" class="md-overwrite-hint">
+                "{{ mdAddKey.trim() }}" は既に登録済みです。保存すると内容が上書きされます。
+              </p>
+            </div>
+            <button v-else @click="startMdAdd" class="btn btn-add">+ md.* 追加</button>
+          </div>
+
           <!-- File links section -->
-          <div class="info-section" v-if="fileExtras.length > 0">
+          <div class="info-section">
             <div class="info-section-label">ファイル</div>
-            <ul class="file-list">
-              <li v-for="x in fileExtras" :key="x.id">
+            <ul class="file-list" v-if="fileExtras.length > 0">
+              <li v-for="x in fileExtras" :key="x.id" class="file-list-item">
                 <a :href="x.extra_value" target="_blank" rel="noopener" class="file-link">
                   {{ fileLabel(x.extra_value) }}
                 </a>
+                <button class="icon-btn" title="削除" @click="removeFileLink(x.id)">🗑️</button>
               </li>
             </ul>
+            <span v-else class="empty-hint">ファイルリンクはまだありません。</span>
+            <div class="tag-add-row file-add-row">
+              <input v-model="newFileUrl" placeholder="https://... のURLを追加"
+                     class="tag-add-input" @keydown.enter.prevent="addFileLink">
+              <button @click="addFileLink" class="btn btn-save">追加</button>
+            </div>
           </div>
         </div>
 
