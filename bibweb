@@ -145,7 +145,7 @@ def get_entry(db_path, cite_key):
         ).fetchall()
         entry["fields"] = [dict(f) for f in fields]
         extras = conn.execute(
-            "SELECT id, extra_key, extra_value FROM extras WHERE entry_id = ? ORDER BY extra_key",
+            "SELECT id, extra_key, extra_value, note FROM extras WHERE entry_id = ? ORDER BY extra_key",
             (entry["id"],)
         ).fetchall()
         entry["extras"] = [dict(x) for x in extras]
@@ -191,7 +191,8 @@ CREATE TABLE extras (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     extra_key   TEXT    NOT NULL,
-    extra_value TEXT
+    extra_value TEXT,
+    note        TEXT
 );
 CREATE TABLE figure_notes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,12 +253,12 @@ def export_db(db_path, cite_keys):
                             (row["id"], f["field_key"], f["field_value"])
                         )
                     for x in src.execute(
-                        "SELECT extra_key, extra_value FROM extras WHERE entry_id = ?",
+                        "SELECT extra_key, extra_value, note FROM extras WHERE entry_id = ?",
                         (row["id"],)
                     ).fetchall():
                         dst.execute(
-                            "INSERT INTO extras (entry_id, extra_key, extra_value) VALUES (?, ?, ?)",
-                            (row["id"], x["extra_key"], x["extra_value"])
+                            "INSERT INTO extras (entry_id, extra_key, extra_value, note) VALUES (?, ?, ?, ?)",
+                            (row["id"], x["extra_key"], x["extra_value"], x["note"])
                         )
                     for fn in src.execute(
                         "SELECT label, memo, image_data, image_mime, sort_order, created_at "
@@ -340,11 +341,11 @@ def create_entry(db_path, cite_key, entry_type, fields):
         return True, None
 
 
-def update_extra(db_path, extra_id, extra_value):
+def update_extra(db_path, extra_id, extra_value, note=None):
     with get_conn(db_path) as conn:
         conn.execute(
-            "UPDATE extras SET extra_value = ? WHERE id = ?",
-            (extra_value, extra_id)
+            "UPDATE extras SET extra_value = ?, note = ? WHERE id = ?",
+            (extra_value, note, extra_id)
         )
         return True
 
@@ -355,7 +356,7 @@ def delete_extra(db_path, extra_id):
         return True
 
 
-def add_extra(db_path, cite_key, extra_key, extra_value):
+def add_extra(db_path, cite_key, extra_key, extra_value, note=None):
     with get_conn(db_path) as conn:
         entry = conn.execute(
             "SELECT id FROM entries WHERE cite_key = ?", (cite_key,)
@@ -363,8 +364,8 @@ def add_extra(db_path, cite_key, extra_key, extra_value):
         if not entry:
             return False
         conn.execute(
-            "INSERT INTO extras (entry_id, extra_key, extra_value) VALUES (?, ?, ?)",
-            (entry["id"], extra_key, extra_value)
+            "INSERT INTO extras (entry_id, extra_key, extra_value, note) VALUES (?, ?, ?, ?)",
+            (entry["id"], extra_key, extra_value, note)
         )
         return True
 
@@ -756,7 +757,11 @@ class BibWebHandler(BaseHTTPRequestHandler):
         elif len(parts) == 5 and parts[4] == "extras":
             cite_key = unquote(parts[3])
             body = self.read_json_body()
-            ok = add_extra(self.db_path, cite_key, body.get("extra_key", ""), body.get("extra_value", ""))
+            ok = add_extra(
+                self.db_path, cite_key,
+                body.get("extra_key", ""), body.get("extra_value", ""),
+                body.get("note") or None
+            )
             self.send_json({"ok": ok})
 
         # POST /api/entries/{key}/tags
@@ -820,7 +825,7 @@ class BibWebHandler(BaseHTTPRequestHandler):
                 self.send_error_json(400, "Invalid id")
                 return
             body = self.read_json_body()
-            ok = update_extra(self.db_path, extra_id, body.get("extra_value", ""))
+            ok = update_extra(self.db_path, extra_id, body.get("extra_value", ""), body.get("note") or None)
             self.send_json({"ok": ok})
 
         # PUT /api/entries/{key}/figures/order — reorder (body: {ids: [...]})

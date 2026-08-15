@@ -182,21 +182,21 @@ const api = {
     });
     return r.json();
   },
-  async updateExtra(id, value) {
+  async updateExtra(id, value, note = null) {
     return fetch(`/api/extras/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ extra_value: value }),
+      body: JSON.stringify({ extra_value: value, note }),
     });
   },
   async deleteExtra(id) {
     return fetch(`/api/extras/${id}`, { method: 'DELETE' });
   },
-  async addExtra(citeKey, extraKey, value) {
+  async addExtra(citeKey, extraKey, value, note = null) {
     return fetch(`/api/entries/${encodeURIComponent(citeKey)}/extras`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ extra_key: extraKey, extra_value: value }),
+      body: JSON.stringify({ extra_key: extraKey, extra_value: value, note }),
     });
   },
   async getTags() {
@@ -640,18 +640,24 @@ const app = createApp({
     // Editing: extras
     const editingExtraId   = ref(null);
     const editingExtraVal  = ref('');
+    const editingExtraNote = ref('');
     const showNewExtra     = ref(false);
     const newExtraKey      = ref('');
     const newExtraVal      = ref('');
+    const newExtraNote     = ref('');
 
     // Info タブ: md.* クイック追加
     const showMdAdd  = ref(false);
     const mdAddKey   = ref('md.digest');
     const mdAddVal   = ref('');
+    const mdAddNote  = ref('');
     const mdAddBusy  = ref(false);
 
-    // Info タブ: ファイルリンク追加
-    const newFileUrl = ref('');
+    // Info タブ: ファイルリンク追加・備考編集
+    const newFileUrl        = ref('');
+    const newFileNote       = ref('');
+    const editingFileNoteId  = ref(null);
+    const editingFileNoteVal = ref('');
 
     // 図表メモ (Figures タブ)
     const figures             = ref([]);   // 選択中エントリの図表メモ一覧（sort_order順）
@@ -841,13 +847,19 @@ const app = createApp({
       newFieldVal.value      = '';
       editingExtraId.value   = null;
       editingExtraVal.value  = '';
+      editingExtraNote.value = '';
       showNewExtra.value     = false;
       newExtraKey.value      = '';
       newExtraVal.value      = '';
+      newExtraNote.value     = '';
       showMdAdd.value        = false;
       mdAddKey.value         = 'md.digest';
       mdAddVal.value         = '';
+      mdAddNote.value        = '';
       newFileUrl.value       = '';
+      newFileNote.value      = '';
+      editingFileNoteId.value  = null;
+      editingFileNoteVal.value = '';
     }
 
     function toggleFieldsEditMode() {
@@ -979,17 +991,19 @@ const app = createApp({
 
     // ── Methods: extra CRUD ────────────────────────────────────────────────
     function startEditExtra(extra) {
-      editingExtraId.value  = extra.id;
-      editingExtraVal.value = extra.extra_value;
+      editingExtraId.value   = extra.id;
+      editingExtraVal.value  = extra.extra_value;
+      editingExtraNote.value = extra.note || '';
     }
 
     function cancelEditExtra() {
-      editingExtraId.value  = null;
-      editingExtraVal.value = '';
+      editingExtraId.value   = null;
+      editingExtraVal.value  = '';
+      editingExtraNote.value = '';
     }
 
     async function saveExtra() {
-      await api.updateExtra(editingExtraId.value, editingExtraVal.value);
+      await api.updateExtra(editingExtraId.value, editingExtraVal.value, editingExtraNote.value.trim() || null);
       cancelEditExtra();
       await refreshEntry();
     }
@@ -1007,9 +1021,10 @@ const app = createApp({
     async function addExtra() {
       const key = newExtraKey.value.trim();
       if (!key) return;
-      await api.addExtra(selectedEntry.value.cite_key, key, newExtraVal.value);
+      await api.addExtra(selectedEntry.value.cite_key, key, newExtraVal.value, newExtraNote.value.trim() || null);
       newExtraKey.value  = '';
       newExtraVal.value  = '';
+      newExtraNote.value = '';
       showNewExtra.value = false;
       await refreshEntry();
     }
@@ -1026,12 +1041,14 @@ const app = createApp({
       showMdAdd.value = true;
       mdAddKey.value   = 'md.digest';
       mdAddVal.value   = '';
+      mdAddNote.value  = '';
     }
 
     function cancelMdAdd() {
       showMdAdd.value = false;
       mdAddKey.value   = 'md.digest';
       mdAddVal.value   = '';
+      mdAddNote.value  = '';
     }
 
     function readTextFile(file) {
@@ -1059,11 +1076,12 @@ const app = createApp({
       if (!mdAddVal.value) return;
       mdAddBusy.value = true;
       try {
+        const note = mdAddNote.value.trim() || null;
         const existing = existingMdExtra(key);
         if (existing) {
-          await api.updateExtra(existing.id, mdAddVal.value);
+          await api.updateExtra(existing.id, mdAddVal.value, note);
         } else {
-          await api.addExtra(selectedEntry.value.cite_key, key, mdAddVal.value);
+          await api.addExtra(selectedEntry.value.cite_key, key, mdAddVal.value, note);
         }
         cancelMdAdd();
         await refreshEntry();
@@ -1082,14 +1100,31 @@ const app = createApp({
         alert('ファイルリンクは http:// または https:// で始まる URL を指定してください。');
         return;
       }
-      await api.addExtra(selectedEntry.value.cite_key, 'file', url);
-      newFileUrl.value = '';
+      await api.addExtra(selectedEntry.value.cite_key, 'file', url, newFileNote.value.trim() || null);
+      newFileUrl.value  = '';
+      newFileNote.value = '';
       await refreshEntry();
     }
 
     async function removeFileLink(id) {
       if (!confirm('このファイルリンクを削除しますか？')) return;
       await api.deleteExtra(id);
+      await refreshEntry();
+    }
+
+    function startEditFileNote(x) {
+      editingFileNoteId.value  = x.id;
+      editingFileNoteVal.value = x.note || '';
+    }
+
+    function cancelEditFileNote() {
+      editingFileNoteId.value  = null;
+      editingFileNoteVal.value = '';
+    }
+
+    async function saveFileNote(x) {
+      await api.updateExtra(x.id, x.extra_value, editingFileNoteVal.value.trim() || null);
+      cancelEditFileNote();
       await refreshEntry();
     }
 
@@ -1304,8 +1339,9 @@ const app = createApp({
       sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
-      editingExtraId, editingExtraVal, showNewExtra, newExtraKey, newExtraVal,
-      showMdAdd, mdAddKey, mdAddVal, mdAddBusy, newFileUrl,
+      editingExtraId, editingExtraVal, editingExtraNote, showNewExtra, newExtraKey, newExtraVal, newExtraNote,
+      showMdAdd, mdAddKey, mdAddVal, mdAddNote, mdAddBusy,
+      newFileUrl, newFileNote, editingFileNoteId, editingFileNoteVal,
       showAddEntry, addDoiInput, addBibText, addParsed, addBusy, addError,
       addMultiWarn, addCitekeyTouched, newAddFieldKey, newAddFieldVal,
       figures, figureBusy, editingFigureId, editingFigureLabel, editingFigureMemo,
@@ -1320,7 +1356,7 @@ const app = createApp({
       startEditField, cancelEditField, saveField, deleteField, addField,
       startEditExtra, cancelEditExtra, saveExtra, deleteExtra, addExtra,
       existingMdExtra, startMdAdd, cancelMdAdd, handleMdFileInput, saveMdExtra,
-      addFileLink, removeFileLink,
+      addFileLink, removeFileLink, startEditFileNote, cancelEditFileNote, saveFileNote,
       exportSelectedDb,
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       openAddEntry, closeAddEntry, parseAddBibText, fetchDoiIntoBib,
@@ -1575,6 +1611,8 @@ const app = createApp({
               <datalist id="md-key-datalist">
                 <option v-for="k in Object.keys(MD_KEY_LABELS)" :key="k" :value="k"></option>
               </datalist>
+              <input v-model="mdAddNote" placeholder="備考（任意）例: 研究会報告資料"
+                     class="note-input">
               <textarea v-model="mdAddVal" placeholder="内容を貼り付け、または下のボタンでファイルから読み込み"
                         class="add-value-input" rows="6"
                         @keydown.ctrl.enter="saveMdExtra" @keydown.meta.enter="saveMdExtra"></textarea>
@@ -1601,17 +1639,40 @@ const app = createApp({
             <div class="info-section-label">ファイル</div>
             <ul class="file-list" v-if="fileExtras.length > 0">
               <li v-for="x in fileExtras" :key="x.id" class="file-list-item">
-                <a :href="x.extra_value" target="_blank" rel="noopener" class="file-link">
-                  {{ fileLabel(x.extra_value) }}
-                </a>
-                <button class="icon-btn" title="削除" @click="removeFileLink(x.id)">🗑️</button>
+                <div class="file-list-main">
+                  <a :href="x.extra_value" target="_blank" rel="noopener" class="file-link">
+                    {{ fileLabel(x.extra_value) }}
+                  </a>
+                  <template v-if="editingFileNoteId === x.id">
+                    <input v-model="editingFileNoteVal" placeholder="備考"
+                           class="note-input"
+                           @keydown.enter.prevent="saveFileNote(x)">
+                    <div class="edit-actions">
+                      <button @click="saveFileNote(x)" class="btn btn-save">保存</button>
+                      <button @click="cancelEditFileNote" class="btn btn-cancel">キャンセル</button>
+                    </div>
+                  </template>
+                  <div v-else-if="x.note" class="file-note" @click="startEditFileNote(x)"
+                       title="クリックして編集">{{ x.note }}</div>
+                </div>
+                <div class="file-list-actions">
+                  <button v-if="editingFileNoteId !== x.id" class="icon-btn" title="備考を編集"
+                          @click="startEditFileNote(x)">📝</button>
+                  <button class="icon-btn" title="削除" @click="removeFileLink(x.id)">🗑️</button>
+                </div>
               </li>
             </ul>
             <span v-else class="empty-hint">ファイルリンクはまだありません。</span>
-            <div class="tag-add-row file-add-row">
-              <input v-model="newFileUrl" placeholder="https://... のURLを追加"
-                     class="tag-add-input" @keydown.enter.prevent="addFileLink">
-              <button @click="addFileLink" class="btn btn-save">追加</button>
+            <div class="file-add-row">
+              <div class="tag-add-row">
+                <input v-model="newFileUrl" placeholder="https://... のURLを追加"
+                       class="tag-add-input" @keydown.enter.prevent="addFileLink">
+              </div>
+              <div class="tag-add-row file-add-note-row">
+                <input v-model="newFileNote" placeholder="備考（任意）例: 元論文 / アノテーションあり"
+                       class="note-input file-add-note-input" @keydown.enter.prevent="addFileLink">
+                <button @click="addFileLink" class="btn btn-save">追加</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1620,6 +1681,7 @@ const app = createApp({
           <div v-if="digestExtra.extra_key !== 'md.digest'" class="digest-fallback-label">
             {{ mdKeyLabel(digestExtra.extra_key) }} を表示中
           </div>
+          <div v-if="digestExtra.note" class="digest-note">{{ digestExtra.note }}</div>
           <markdown-renderer :content="digestExtra.extra_value"></markdown-renderer>
         </div>
       </div>
@@ -1688,6 +1750,7 @@ const app = createApp({
                   <textarea v-model="editingExtraVal" class="edit-textarea"
                             :rows="x.extra_key.startsWith('md.') ? 14 : 3"
                             @keydown.ctrl.enter="saveExtra" @keydown.meta.enter="saveExtra"></textarea>
+                  <input v-model="editingExtraNote" placeholder="備考（任意）" class="note-input extra-note-input">
                   <div class="edit-actions">
                     <button @click="saveExtra" class="btn btn-save">保存</button>
                     <button @click="cancelEditExtra" class="btn btn-cancel">キャンセル</button>
@@ -1695,6 +1758,7 @@ const app = createApp({
                 </template>
                 <template v-else>
                   <span class="kv-text kv-truncate">{{ x.extra_value }}</span>
+                  <div v-if="x.note" class="kv-note">📝 {{ x.note }}</div>
                   <div class="row-actions">
                     <button @click="startEditExtra(x)" class="icon-btn" title="編集">✏️</button>
                     <button @click="deleteExtra(x.id, x.extra_key)" class="icon-btn" title="削除">🗑️</button>
@@ -1713,9 +1777,10 @@ const app = createApp({
                  @keydown.enter.prevent="addExtra">
           <textarea v-model="newExtraVal" placeholder="値" class="add-value-input" rows="3"
                     @keydown.ctrl.enter="addExtra" @keydown.meta.enter="addExtra"></textarea>
+          <input v-model="newExtraNote" placeholder="備考（任意）" class="note-input">
           <div class="edit-actions">
             <button @click="addExtra" class="btn btn-save">追加</button>
-            <button @click="showNewExtra = false; newExtraKey = ''; newExtraVal = ''"
+            <button @click="showNewExtra = false; newExtraKey = ''; newExtraVal = ''; newExtraNote = ''"
                     class="btn btn-cancel">キャンセル</button>
           </div>
         </div>
@@ -1727,6 +1792,7 @@ const app = createApp({
         <nav class="md-tab-bar" v-if="mdExtras.length > 1">
           <button v-for="x in mdExtras" :key="x.id"
                   class="md-tab-btn" :class="{ active: activeMdKey === x.id }"
+                  :title="x.note || ''"
                   @click="activeMdKey = x.id">
             {{ mdKeyLabel(x.extra_key) }}
           </button>
@@ -1734,6 +1800,7 @@ const app = createApp({
 
         <template v-for="x in mdExtras" :key="x.id">
           <div v-show="activeMdKey === x.id" class="md-viewer">
+            <div v-if="x.note" class="md-note">{{ x.note }}</div>
             <markdown-renderer :content="x.extra_value"></markdown-renderer>
           </div>
         </template>

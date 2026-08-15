@@ -486,6 +486,32 @@ body {
 }
 .add-value-input:focus { border-color: #1565c0; }
 
+/* ─── Notes (extras.note: 備考) ─────────────────────────────────────────────── */
+.note-input {
+  padding: 6px 9px;
+  border: 1px solid #bdbdbd;
+  border-radius: 5px;
+  font-size: 12px;
+  color: #616161;
+  outline: none;
+}
+.note-input:focus { border-color: #1565c0; color: #212121; }
+
+.extra-note-input { margin-top: 6px; }
+
+.kv-note {
+  font-size: 12px;
+  color: #757575;
+  margin: 4px 0 0;
+  word-break: break-word;
+}
+
+.md-note, .digest-note {
+  font-size: 12px;
+  color: #757575;
+  margin: 0 0 12px;
+}
+
 .empty-hint {
   color: #9e9e9e;
   font-size: 13px;
@@ -839,10 +865,35 @@ body {
 
 .file-list-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
 }
+
+.file-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-list-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.file-note {
+  font-size: 12px;
+  color: #757575;
+  cursor: pointer;
+  word-break: break-word;
+}
+.file-note:hover { color: #424242; }
+
+.file-add-note-row { margin-top: 6px; }
+.file-add-note-input { flex: 1; }
 
 .file-link {
   display: inline-flex;
