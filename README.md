@@ -127,13 +127,11 @@ Extras タブは `extras` テーブルの raw ビューとして機能し、特�
 Dropbox・Google Drive・arXiv・機関リポジトリなど、任意の URL を登録できます。
 
 - **Info タブから**: 「ファイル」セクションの入力欄に URL を貼り付けて「追加」を押すだけです（`http://`/`https://` 以外は拒否されます）。1 エントリに複数件登録でき、既存のリンクはそのまま残ります（常に追加）。一覧の 🗑️ ボタンから削除できます。
-- **SQL から**（一括登録や既存データの移行など）:
+- **CLI から**（一括登録や既存データの移行など）: `bibdb set-extra` を使います。`file` は複数行を許容するキーなので `--append` を付けてください（[bibdb の README](https://github.com/ugohsu/bibdb) 参照）。
 
-```sql
--- 例: Dropbox の共有リンクを登録
-INSERT INTO extras (entry_id, extra_key, extra_value)
-SELECT id, 'file', 'https://www.dropbox.com/scl/fi/xxxx/Knuth1984.pdf'
-FROM entries WHERE cite_key = 'Knuth1984';
+```bash
+# 例: Dropbox の共有リンクを登録
+echo 'https://www.dropbox.com/scl/fi/xxxx/Knuth1984.pdf' | bibdb set-extra Knuth1984 file --append
 ```
 
 ### Markdown コンテンツのキー命名規則
@@ -155,13 +153,14 @@ Extras タブで `extra_key`/`extra_value` を直打ちしなくても、Info �
 
 エージェント型AIに要約を作らせてそのまま流し込みたい場合は、GUIを介さず `bibdb set-extra` を使うほうが手軽です（[bibdb の README](https://github.com/ugohsu/bibdb) 参照）。
 
-extras への Markdown 挿入は SQL または bibweb の Info/Extras タブから行えます：
+extras への Markdown 挿入は `bibdb set-extra` または bibweb の Info/Extras タブから行えます：
 
-```sql
--- 例: Claude による AI 要約を登録
-INSERT INTO extras (entry_id, extra_key, extra_value)
-SELECT id, 'md.digest', '## 概要\n...'
-FROM entries WHERE cite_key = 'Knuth1984';
+```bash
+# 例: Claude による AI 要約を登録
+claude -p "Knuth1984.pdf を要約して" | bibdb set-extra Knuth1984 md.digest
+
+# 既存の md.digest を上書きする場合
+claude -p "..." | bibdb set-extra Knuth1984 md.digest --replace
 ```
 
 ---
