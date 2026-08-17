@@ -359,7 +359,9 @@ function capitalizeWord(w) {
 
 // 単語ごとに先頭を大文字化する（冠詞・短い前置詞・等位接続詞は先頭/末尾以外なら小文字のまま）。
 // {...} で囲まれた区間（BibTeXの大文字小文字保護）は中身に触れずそのまま残す。
-function toTitleCase(title) {
+// protectInitials=true の場合、1文字語（人名のミドルネーム等のイニシャル）は冠詞 'a' 等との
+// 衝突による誤った小文字化の対象にしない（author フィールド向け）。
+function toTitleCase(title, protectInitials) {
   if (!title) return title;
   const parts = title.split(/(\{[^{}]*\})/g);
   const wordRe = /[A-Za-z][A-Za-z'’]*/g;
@@ -374,10 +376,25 @@ function toTitleCase(title) {
     return part.replace(wordRe, (w) => {
       seen++;
       const lower = w.toLowerCase();
+      if (protectInitials && w.length === 1) return capitalizeWord(w);
       if (seen !== 1 && seen !== totalWords && TITLECASE_MINOR.has(lower)) return lower;
       return capitalizeWord(w);
     });
   }).join('');
+}
+
+// Crossref由来のtitle等に混入するJATS系タグを処理してからタイトルケース化する。
+// <scp>ACRONYM</scp> は大文字を維持すべき頭字語のマーカーなので {ACRONYM}（toTitleCaseの
+// 大文字保護記法）に変換する。<i>/<sup>/<sub>/<b> 等の純粋な装飾タグは、除去時に単語が
+// 連結しないよう空白に置換して除去する。
+const SCP_TAG_RE = /<scp>([\s\S]*?)<\/scp>/gi;
+const DECOR_TAG_RE = /<[^>]+>/g;
+
+function cleanAndTitleCase(raw, protectInitials) {
+  if (!raw) return raw;
+  let s = raw.replace(SCP_TAG_RE, (_, inner) => '{' + inner + '}');
+  s = s.replace(DECOR_TAG_RE, ' ').replace(/\s+/g, ' ').trim();
+  return toTitleCase(s, protectInitials);
 }
 
 // ─── citekey 生成 ────────────────────────────────────────────────────────────────
@@ -1266,7 +1283,9 @@ const app = createApp({
         addMultiWarn.value = true;
       }
       const fields = { ...parsed.fields };
-      if (fields.title) fields.title = toTitleCase(fields.title);
+      if (fields.title) fields.title = cleanAndTitleCase(fields.title);
+      if (fields.author) fields.author = cleanAndTitleCase(fields.author, true);
+      if (fields.journal) fields.journal = cleanAndTitleCase(fields.journal);
       const citeKey = (addCitekeyTouched.value && addParsed.value)
         ? addParsed.value.cite_key
         : makeCitekey(fields, existingKeySet());
