@@ -4,6 +4,8 @@
 
 bibdb 本体のコード（CLI の動作）は変更しませんが、同じ DB ファイルを直接読み書きします。**図表メモ機能（後述）に限り、bibdb 側にも `figure_notes` テーブルと dedup/`.db` インポート時の統合ロジックを追加しています**。これは bibweb だけがテーブルを知っている状態だと、`bibdb dedup` や `bibdb import *.db` でエントリが統合されたときに図表メモが孤立・消失してしまうためです。それ以外の機能は従来どおり bibweb 側だけで完結しています。
 
+逆に、**ローカル限定ファイルパス機能（後述）は意図的に bibdb 側に一切手を加えていません**。DB ファイルの置き場所に紐づく情報（PDF 本体への相対パスなど）は、`.db` エクスポートや `bibdb dedup`・`.db` インポートで別の場所に派生させた DB に持ち込まれると意味を失うため、逆に bibdb にその存在を一切感知させないことで、派生 DB への混入を防いでいます。
+
 ## 特徴
 
 - **1 ファイル配布**: `bibweb` スクリプトを `$PATH` の通ったディレクトリに置くだけで使えます
@@ -14,6 +16,7 @@ bibdb 本体のコード（CLI の動作）は変更しませんが、同じ DB 
 - **図表・表のメモ**: 「Exhibits」タブ（Info タブと Markdown タブの間）で、論文中の図表のスクリーンショットをペースト/ドラッグ&ドロップで貼り付け、キャプションとメモを残せます。画像はリサイズせず、PNG パレット削減のみ行って保存します。表示順は後から並べ替えられます（詳細は後述）
 - **タグ管理**: `extras` の `tags` キーを使ったタグ付け・絞り込みができます
 - **ファイルリンク**: `extras` の `file` キーに外部 URL（Dropbox・Google Drive・arXiv など）を Info タブから追加・閲覧・削除できます
+- **ローカルPDFの表示**: DB ファイルの置き場所からの相対パスを専用テーブル（`local_extras`）に登録しておくと、Info タブから「PDFを開く」リンクとして開けます。表示専用（GUIからの追加・編集・削除は非対応）で、`.db` エクスポートや `bibdb dedup`/インポートの対象にも含まれません（詳細は後述）
 - **Markdown レンダリング**: `extras` の `md.*` キーに格納した Markdown（論文・要約・翻訳など）を KaTeX・Mermaid・PlantUML つきで表示します。Info タブから貼り付け/ファイル読み込みで `md.*` を追加・上書きすることもできます
 - **備考（note）**: `extras` の各行には自由記述の備考を1つ添えられます。ファイルリンクや `md.*` を複数登録する場合に、「元論文」「アノテーションあり」「研究会報告資料」のような用途を書き添えて、Info/Markdown/Extras タブに表示できます
 - **`.db` エクスポート**: 選択したエントリを `extras`・図表メモ（`figure_notes`）ごと bibdb 互換の SQLite ファイルとして書き出せます
@@ -73,7 +76,7 @@ bibweb --update         # UI ファイルを GitHub から再取得して終了
 
 ### エントリ詳細（右パネル）
 
-**Info タブ**: BibTeX フィールドの表示・編集・削除・追加。タグの付け替え。ファイルリンクの一覧・追加・削除（`file` extra）。`md.*` extra のクイック追加（貼り付け or ファイル読み込み、詳細は後述）。`extras` に `md.digest` キーがある場合は右側にダイジェストを並べて表示します。
+**Info タブ**: BibTeX フィールドの表示・編集・削除・追加。セクションはタグ→ファイル→Markdownの順に並びます。タグの付け替え。ファイルリンクの一覧・追加・削除（`file` extra）、および登録されていればローカルPDFへの「開く」リンク（`local_extras`、表示専用・詳細は後述）。`md.*` extra のクイック追加（貼り付け or ファイル読み込み、詳細は後述）。`extras` に `md.digest` キーがある場合は右側にダイジェストを並べて表示します。
 
 **Exhibits タブ**: 論文中の図・表・数式のスクリーンショットにキャプションとメモを添えて保存できます（詳細は後述）。専用の `figure_notes` テーブルに保存され、`extras` には影響しません。
 
@@ -110,6 +113,8 @@ bibweb は `extras` テーブルの一部のキーを予約済みとして特別
 | `md.*`（`md.` で始まる全キー） | **Info タブの Markdown セクションから追加・上書き**（詳細は後述）。**Markdown タブで表示**。Extras タブでも編集・削除できます。 |
 
 Extras タブは `extras` テーブルの raw ビューとして機能し、特殊キーを含む全行を編集・削除できます。
+
+**PDF本体のローカルパスなど、DBファイルの置き場所に依存する情報は `extras` には入れません。** 別テーブル `local_extras` で管理します（[ローカル限定ファイルパス](#ローカル限定ファイルパスlocal_extras)を参照）。
 
 ### 備考（`note` カラム）
 
@@ -190,6 +195,42 @@ claude -p "..." | bibdb set-extra Knuth1984 md.digest --replace
 
 ---
 
+## ローカル限定ファイルパス（local_extras）
+
+PDF本体をDropbox等で同期し、DBファイル（`refs.db`）と同じ構成で持ち歩く運用の場合、「DBファイルを起点とした相対パス」は環境をまたいでも意味を持ちます。しかし、これを `extras` に入れてしまうと、`.db` エクスポートや `bibdb dedup`／`.db` インポートで**別の場所に派生させたDB**にまで、その環境では意味を持たない相対パスが紛れ込んでしまいます。この問題を避けるため、`extras` とは別の専用テーブル `local_extras`（スキーマは `extras` と同じ: `entry_id`/`extra_key`/`extra_value`/`note`、`entry_id` は `ON DELETE CASCADE`）を用意し、扱いを明確に分けています。
+
+- **bibdbからは一切参照されません**: dedup・`.bib`/`.db` インポートは `entries`/`fields`/`extras`/`figure_notes` という決め打ちのテーブル名しか見ないため、`local_extras` はコード変更なしに自動的に無視されます（bibdb本体は無改修です）。
+- **bibwebの `.db` エクスポートにも含まれません**: コピー対象テーブルを明示的に列挙している実装のため、`local_extras` は対象外です。
+- **`bibdb dedup` でエントリが統合されるとき**、削除される側の `local_extras` 行は `ON DELETE CASCADE` でそのまま消えます。`extras`/`figure_notes` のような「残る側への再アサイン」は行いません（同一DB内での重複整理をほぼ行わない運用であれば実害は小さい想定です）。
+- **GUIからの追加・編集・削除はサポートしていません**（Info タブでは表示専用）。登録はスクリプトや `sqlite3` での直接 `INSERT` で行う運用を想定しています。
+
+### 使用中のキー
+
+| `extra_key` | 用途 | Info タブでの表示ラベル |
+|---|---|---|
+| `pdf_path` | DBファイルのディレクトリを起点とした、PDF本体への相対パス | PDFを開く |
+
+### 登録方法（GUI外）
+
+`local_extras` テーブルは、対象DBに対して `bibweb` を一度でも起動すれば自動的に作成されます（`figure_notes` と同様、既存の古いDBにも自動追加されます）。登録はSQLで直接行ってください。
+
+```bash
+# 例: cite_key が Smith_2024_disclosure のエントリに pdf_path を登録
+sqlite3 refs.db "
+  INSERT INTO local_extras (entry_id, extra_key, extra_value)
+  SELECT id, 'pdf_path', 'papers/TAR/2024/TAR_2024_v99n1_1475-679X.12345.pdf'
+  FROM entries WHERE cite_key = 'Smith_2024_disclosure';
+"
+```
+
+### API（参考）
+
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/api/entries/{cite_key}/local-file/{extra_key}` | 相対パスをDBファイルのディレクトリを起点に解決し、ファイル本体を返す。ディレクトリトラバーサル対策あり（解決後のパスがDBディレクトリ外に出る場合・ファイルが存在しない場合は404） |
+
+---
+
 ## Markdown レンダリング対応
 
 | 機能 | 動作 |
@@ -209,20 +250,21 @@ bibweb --update
 
 ## bibdb との関係
 
-bibweb は bibdb の DB スキーマに直接アクセスします。bibdb 本体の CLI としての動作は変更しませんが、図表メモ機能に限っては bibdb 側のスキーマ定義・dedup・`.db` インポートのロジックにも `figure_notes` を追加しています（冒頭の説明を参照）。
+bibweb は bibdb の DB スキーマに直接アクセスします。bibdb 本体の CLI としての動作は変更しませんが、図表メモ機能に限っては bibdb 側のスキーマ定義・dedup・`.db` インポートのロジックにも `figure_notes` を追加しています（冒頭の説明を参照）。逆にローカル限定ファイルパス機能（`local_extras`）は bibdb 側に一切手を加えておらず、bibdb からは存在ごと感知されません（[ローカル限定ファイルパス](#ローカル限定ファイルパスlocal_extras)を参照）。
 
 | | bibdb | bibweb |
 |---|---|---|
 | `.bib` のインポート | ✅（コンフリクト解決あり） | — |
 | `.bib` のエクスポート | ✅ | ✅（選択エントリを GUI から） |
-| `.db` のエクスポート | — | ✅（選択エントリを GUI から・extras / 図表メモごと） |
+| `.db` のエクスポート | — | ✅（選択エントリを GUI から・extras / 図表メモごと。`local_extras` は含まれません） |
 | フィールドの編集 | — | ✅ |
 | 新規エントリの登録 | ✅（`.bib` インポート） | ✅（DOI 取得 / BibTeX 貼り付け） |
 | extras の管理 | SQL 直接操作 / `set-extra`（書き込み専用） | ✅ GUI から |
 | 図表メモの管理 | — | ✅ GUI から（Exhibits タブ） |
 | タグ管理 | — | ✅ GUI から |
 | ファイルリンク | — | ✅ GUI から閲覧・追加・削除（Info タブ） |
-| 重複整理（dedup） | ✅（`extras`・`figure_notes` とも lossless 統合） | — |
+| ローカルPDFパス（`local_extras`） | — （意図的に非対応。SQL直接操作のみ） | ✅ GUI から閲覧のみ（Info タブ、追加/編集/削除は非対応） |
+| 重複整理（dedup） | ✅（`extras`・`figure_notes` は lossless 統合、`local_extras` は対象外でcascade削除） | — |
 | Markdown 閲覧 | — | ✅ |
 
 ## ライセンス
