@@ -383,6 +383,25 @@ function toTitleCase(title, protectInitials) {
   }).join('');
 }
 
+// Crossref由来のtitle等には、XML由来の実体参照（&amp; 等）がデコードされないまま
+// 残っていることがある。デコードしないと "M&amp;A" の "&" が単語境界として扱われ、
+// "amp" が独立した単語として大文字化されて "M&Amp;A" のように壊れる。
+const HTML_ENTITY_RE = /&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g;
+const HTML_NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+
+function decodeHtmlEntities(s) {
+  if (!s) return s;
+  return s.replace(HTML_ENTITY_RE, (m, ent) => {
+    if (ent[0] === '#') {
+      const code = (ent[1] === 'x' || ent[1] === 'X')
+        ? parseInt(ent.slice(2), 16)
+        : parseInt(ent.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+    }
+    return HTML_NAMED_ENTITIES[ent] ?? m;
+  });
+}
+
 // Crossref由来のtitle等に混入するJATS系タグを処理してからタイトルケース化する。
 // <scp>ACRONYM</scp> は大文字を維持すべき頭字語のマーカーなので {ACRONYM}（toTitleCaseの
 // 大文字保護記法）に変換する。<i>/<sup>/<sub>/<b> 等の純粋な装飾タグは、除去時に単語が
@@ -390,9 +409,23 @@ function toTitleCase(title, protectInitials) {
 const SCP_TAG_RE = /<scp>([\s\S]*?)<\/scp>/gi;
 const DECOR_TAG_RE = /<[^>]+>/g;
 
+// "M&A"・"AT&T"・"R&D" のような、"&" で直接連結された略語は元の大文字小文字のまま保護する。
+// 保護しないと "M&A" の "A" が単語境界（"&"）で独立した1単語とみなされ、冠詞 "a" と
+// 衝突して誤って小文字化されてしまう（"M&a"）。既に {...} で保護済みの区間（<scp>由来など）
+// は toTitleCase と同じ分割ロジックで除外し、二重に括弧を被せないようにする。
+const AMP_ABBR_RE = /\b[A-Za-z]+&[A-Za-z]+\b/g;
+
+function protectAmpAbbreviations(s) {
+  return s.split(/(\{[^{}]*\})/g).map(part =>
+    part.startsWith('{') ? part : part.replace(AMP_ABBR_RE, (m) => '{' + m + '}')
+  ).join('');
+}
+
 function cleanAndTitleCase(raw, protectInitials) {
   if (!raw) return raw;
-  let s = raw.replace(SCP_TAG_RE, (_, inner) => '{' + inner + '}');
+  let s = decodeHtmlEntities(raw);
+  s = s.replace(SCP_TAG_RE, (_, inner) => '{' + inner + '}');
+  s = protectAmpAbbreviations(s);
   s = s.replace(DECOR_TAG_RE, ' ').replace(/\s+/g, ' ').trim();
   return toTitleCase(s, protectInitials);
 }
