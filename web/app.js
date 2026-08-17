@@ -582,6 +582,20 @@ const MD_KEY_LABELS = {
   'md.digest':  'ダイジェスト',
 };
 
+// local_extras（DBファイルの置き場所に紐づくローカル限定データ。extrasには入れない）の
+// extra_key ごとの表示ラベル。未知の key はそのまま表示する。
+const LOCAL_FILE_KEY_LABELS = {
+  'pdf_path': 'PDFを開く',
+};
+
+function localFileLabel(key) {
+  return LOCAL_FILE_KEY_LABELS[key] ?? key;
+}
+
+function localFileUrl(citeKey, extraKey) {
+  return `/api/entries/${encodeURIComponent(citeKey)}/local-file/${encodeURIComponent(extraKey)}`;
+}
+
 function mdKeyLabel(key) {
   return MD_KEY_LABELS[key] ?? key;
 }
@@ -794,6 +808,13 @@ const app = createApp({
 
     const fileExtras = computed(() =>
       (selectedEntry.value?.extras ?? []).filter(x => x.extra_key === 'file')
+    );
+
+    // local_extras: このDBファイルの置き場所に紐づくローカル限定パス（例: pdf_path）。
+    // extras とは別テーブルで管理しており、GUIからの追加・編集・削除はサポートしない
+    // （設定はスクリプト/直接SQL経由の運用を想定。当面は表示専用）。
+    const localFileExtras = computed(() =>
+      selectedEntry.value?.local_extras ?? []
     );
 
     const addCitekeyStatus = computed(() => {
@@ -1367,7 +1388,7 @@ const app = createApp({
       lightboxFigureId,
       // computed
       searchResults, filteredEntries, mdExtras, otherExtras, allChecked, digestExtra,
-      fileExtras, addCitekeyStatus, similarEntries,
+      fileExtras, localFileExtras, addCitekeyStatus, similarEntries,
       entryTags, availableTags,
       // methods
       selectEntry, toggleCheck, toggleAll, exportSelected,
@@ -1384,7 +1405,7 @@ const app = createApp({
       startEditFigure, cancelFigureEdit, saveFigureEdit, deleteFigureNote, moveFigure,
       openFigureLightbox, closeFigureLightbox,
       // helpers exposed to template
-      mdKeyLabel, fileLabel, firstAuthor, MD_KEY_LABELS,
+      mdKeyLabel, fileLabel, localFileLabel, localFileUrl, firstAuthor, MD_KEY_LABELS,
       // scroll memory refs
       digestPanelRef, figuresPanelRef,
     };
@@ -1621,6 +1642,66 @@ const app = createApp({
             </div>
           </div>
 
+          <!-- File links section -->
+          <div class="info-section">
+            <div class="info-section-label">ファイル</div>
+            <ul class="file-list" v-if="fileExtras.length > 0">
+              <li v-for="x in fileExtras" :key="x.id" class="file-list-item">
+                <div class="file-list-main">
+                  <a :href="x.extra_value" target="_blank" rel="noopener" class="file-link">
+                    {{ fileLabel(x.extra_value) }}
+                  </a>
+                  <template v-if="editingFileNoteId === x.id">
+                    <input v-model="editingFileNoteVal" placeholder="備考"
+                           class="note-input"
+                           @keydown.enter.prevent="saveFileNote(x)">
+                    <div class="edit-actions">
+                      <button @click="saveFileNote(x)" class="btn btn-save">保存</button>
+                      <button @click="cancelEditFileNote" class="btn btn-cancel">キャンセル</button>
+                    </div>
+                  </template>
+                  <div v-else-if="x.note" class="file-note" @click="startEditFileNote(x)"
+                       title="クリックして編集">{{ x.note }}</div>
+                </div>
+                <div class="file-list-actions">
+                  <button v-if="editingFileNoteId !== x.id" class="icon-btn" title="備考を編集"
+                          @click="startEditFileNote(x)">📝</button>
+                  <button class="icon-btn" title="削除" @click="removeFileLink(x.id)">🗑️</button>
+                </div>
+              </li>
+            </ul>
+            <span v-else class="empty-hint">ファイルリンクはまだありません。</span>
+
+            <!-- ローカル限定パス（local_extras; 例: pdf_path）。表示専用、追加/編集/削除はGUI外で行う -->
+            <template v-if="localFileExtras.length > 0">
+              <div class="local-file-label">ローカルファイル</div>
+              <ul class="file-list">
+                <li v-for="x in localFileExtras" :key="x.id" class="file-list-item">
+                  <div class="file-list-main">
+                    <a :href="localFileUrl(selectedEntry.cite_key, x.extra_key)"
+                       target="_blank" rel="noopener" class="file-link">
+                      {{ localFileLabel(x.extra_key) }}
+                    </a>
+                    <div class="file-note-static">{{ x.extra_value }}</div>
+                    <div v-if="x.note" class="file-note-static">{{ x.note }}</div>
+                  </div>
+                </li>
+              </ul>
+            </template>
+
+            <div class="file-add-row">
+              <div class="tag-add-row">
+                <input v-model="newFileUrl" placeholder="https://... のURLを追加"
+                       class="tag-add-input" @keydown.enter.prevent="addFileLink">
+              </div>
+              <div class="tag-add-row file-add-note-row">
+                <input v-model="newFileNote" placeholder="備考（任意）例: 元論文 / アノテーションあり"
+                       class="note-input file-add-note-input" @keydown.enter.prevent="addFileLink">
+                <button @click="addFileLink" class="btn btn-save">追加</button>
+              </div>
+            </div>
+          </div>
+
           <!-- Markdown (md.*) quick-add section -->
           <div class="info-section">
             <div class="info-section-label">Markdown</div>
@@ -1651,48 +1732,6 @@ const app = createApp({
               </p>
             </div>
             <button v-else @click="startMdAdd" class="btn btn-add">+ md.* 追加</button>
-          </div>
-
-          <!-- File links section -->
-          <div class="info-section">
-            <div class="info-section-label">ファイル</div>
-            <ul class="file-list" v-if="fileExtras.length > 0">
-              <li v-for="x in fileExtras" :key="x.id" class="file-list-item">
-                <div class="file-list-main">
-                  <a :href="x.extra_value" target="_blank" rel="noopener" class="file-link">
-                    {{ fileLabel(x.extra_value) }}
-                  </a>
-                  <template v-if="editingFileNoteId === x.id">
-                    <input v-model="editingFileNoteVal" placeholder="備考"
-                           class="note-input"
-                           @keydown.enter.prevent="saveFileNote(x)">
-                    <div class="edit-actions">
-                      <button @click="saveFileNote(x)" class="btn btn-save">保存</button>
-                      <button @click="cancelEditFileNote" class="btn btn-cancel">キャンセル</button>
-                    </div>
-                  </template>
-                  <div v-else-if="x.note" class="file-note" @click="startEditFileNote(x)"
-                       title="クリックして編集">{{ x.note }}</div>
-                </div>
-                <div class="file-list-actions">
-                  <button v-if="editingFileNoteId !== x.id" class="icon-btn" title="備考を編集"
-                          @click="startEditFileNote(x)">📝</button>
-                  <button class="icon-btn" title="削除" @click="removeFileLink(x.id)">🗑️</button>
-                </div>
-              </li>
-            </ul>
-            <span v-else class="empty-hint">ファイルリンクはまだありません。</span>
-            <div class="file-add-row">
-              <div class="tag-add-row">
-                <input v-model="newFileUrl" placeholder="https://... のURLを追加"
-                       class="tag-add-input" @keydown.enter.prevent="addFileLink">
-              </div>
-              <div class="tag-add-row file-add-note-row">
-                <input v-model="newFileNote" placeholder="備考（任意）例: 元論文 / アノテーションあり"
-                       class="note-input file-add-note-input" @keydown.enter.prevent="addFileLink">
-                <button @click="addFileLink" class="btn btn-save">追加</button>
-              </div>
-            </div>
           </div>
         </div>
 

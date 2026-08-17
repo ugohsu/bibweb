@@ -10,6 +10,7 @@ import argparse
 import base64
 import io
 import json
+import mimetypes
 import os
 import re
 import sqlite3
@@ -149,6 +150,11 @@ def get_entry(db_path, cite_key):
             (entry["id"],)
         ).fetchall()
         entry["extras"] = [dict(x) for x in extras]
+        local_extras = conn.execute(
+            "SELECT id, extra_key, extra_value, note FROM local_extras WHERE entry_id = ? ORDER BY extra_key",
+            (entry["id"],)
+        ).fetchall()
+        entry["local_extras"] = [dict(x) for x in local_extras]
         return entry
 
 
@@ -226,6 +232,33 @@ def ensure_figure_notes_table(db_path):
         conn.commit()
     finally:
         conn.close()
+
+
+def ensure_local_extras_table(db_path):
+    """local_extras: このDBファイルの置き場所に紐づくローカル限定データ（例: pdf_path=PDFへの相対パス）。
+    意図的に bibdb 本体（entries/fields/extras/figure_notes）からは独立させている:
+    - bibdb の dedup/`.db` インポートは既知のテーブル名しか見ないため、このテーブルを一切感知しない。
+    - bibweb 自身の `.db` エクスポート（export_db）もコピー対象テーブルを明示列挙しているため、
+      ここに加えない限り自動的にエクスポートから除外される。
+    → 別の場所に派生させた `.db` に、意味を失った相対パスが紛れ込むことを防ぐ。
+    entries への参照は ON DELETE CASCADE なので、bibdb 側でエントリが削除・dedup統合された際は
+    そのまま自動的に消える（figure_notes/extras のような再アサイン対応はしない）。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS local_extras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                extra_key TEXT NOT NULL,
+                extra_value TEXT,
+                note TEXT,
+                FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def export_db(db_path, cite_keys):
     fd, tmp = tempfile.mkstemp(suffix=".db")
@@ -418,6 +451,32 @@ def get_figure_image(db_path, note_id):
         if not row or row["image_data"] is None:
             return None, None
         return row["image_data"], row["image_mime"]
+
+
+def get_local_file(db_path, cite_key, extra_key):
+    """local_extras に登録された、DBファイルからの相対パスを解決してファイル内容を返す。
+    local_extras はこのDBファイルのある場所に紐づくローカル限定データ（例: pdf_path）であり、
+    bibdb のコードからは一切参照されない（dedup/インポート/エクスポートの対象外）。"""
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT le.extra_value FROM local_extras le "
+            "JOIN entries e ON e.id = le.entry_id "
+            "WHERE e.cite_key = ? AND le.extra_key = ?",
+            (cite_key, extra_key)
+        ).fetchone()
+    if not row or not row["extra_value"]:
+        return None
+    base_dir = os.path.dirname(os.path.abspath(db_path))
+    full_path = os.path.normpath(os.path.join(base_dir, row["extra_value"]))
+    # ディレクトリトラバーサル対策: base_dir の外に出るパスは拒否
+    if os.path.commonpath([base_dir, full_path]) != base_dir:
+        return None
+    if not os.path.isfile(full_path):
+        return None
+    mime, _ = mimetypes.guess_type(full_path)
+    with open(full_path, "rb") as f:
+        content = f.read()
+    return content, mime or "application/octet-stream", os.path.basename(full_path)
 
 
 def add_figure_note(db_path, cite_key, label, memo, image_bytes, image_mime):
@@ -660,6 +719,22 @@ class BibWebHandler(BaseHTTPRequestHandler):
                     self.send_error_json(404, "Entry not found")
                 else:
                     self.send_json(figures)
+            # /api/entries/{key}/local-file/{extra_key}
+            elif len(parts) == 6 and parts[4] == "local-file":
+                cite_key = unquote(parts[3])
+                extra_key = unquote(parts[5])
+                result = get_local_file(self.db_path, cite_key, extra_key)
+                if result is None:
+                    self.send_error_json(404, "Not found")
+                    return
+                content, mime, filename = result
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(content)
             else:
                 self.send_error_json(404, "Not found")
 
@@ -913,6 +988,8 @@ def main():
 
     # 図表メモ機能: 既存 DB にも figure_notes テーブルを用意する
     ensure_figure_notes_table(db_path)
+    # ローカル限定ファイルパス機能: 既存 DB にも local_extras テーブルを用意する
+    ensure_local_extras_table(db_path)
 
     # Download UI files on first run
     if not all((CACHE_DIR / f).exists() for f in REPO_FILES):
