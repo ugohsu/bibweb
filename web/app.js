@@ -432,11 +432,22 @@ function protectAmpAbbreviations(s) {
   ).join('');
 }
 
+// LaTeX上 "&" は表組みの列区切りに使う予約文字のため、実際にBibTeX/LaTeXでタイプセット
+// する前提でここでエスケープしてDBに格納する（表示・エクスポートのどちらでもそのまま
+// 使える値にする）。既に "\&" とエスケープ済みの箇所（手入力等）は二重エスケープしない
+// よう対象外にする。
+const UNESCAPED_AMP_RE = /(?<!\\)&/g;
+
+function escapeAmpersand(s) {
+  return s.replace(UNESCAPED_AMP_RE, '\\&');
+}
+
 function cleanAndTitleCase(raw, protectInitials) {
   if (!raw) return raw;
   let s = decodeHtmlEntities(raw);
   s = s.replace(SCP_TAG_RE, (_, inner) => '{' + inner + '}');
   s = protectAmpAbbreviations(s);
+  s = escapeAmpersand(s);
   s = s.replace(DECOR_TAG_RE, ' ').replace(/\s+/g, ' ').trim();
   return toTitleCase(s, protectInitials);
 }
