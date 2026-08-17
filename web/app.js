@@ -389,8 +389,7 @@ function toTitleCase(title, protectInitials) {
 const HTML_ENTITY_RE = /&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g;
 const HTML_NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
 
-function decodeHtmlEntities(s) {
-  if (!s) return s;
+function decodeHtmlEntitiesOnce(s) {
   return s.replace(HTML_ENTITY_RE, (m, ent) => {
     if (ent[0] === '#') {
       const code = (ent[1] === 'x' || ent[1] === 'X')
@@ -400,6 +399,18 @@ function decodeHtmlEntities(s) {
     }
     return HTML_NAMED_ENTITIES[ent] ?? m;
   });
+}
+
+// 一部の古いCrossrefレコード（例: 1940年代のTAR誌）は "&amp;amp;" のように二重エスケープ
+// されているため、変化がなくなるまで繰り返しデコードする。
+function decodeHtmlEntities(s, maxPasses = 5) {
+  if (!s) return s;
+  for (let i = 0; i < maxPasses; i++) {
+    const next = decodeHtmlEntitiesOnce(s);
+    if (next === s) break;
+    s = next;
+  }
+  return s;
 }
 
 // Crossref由来のtitle等に混入するJATS系タグを処理してからタイトルケース化する。
