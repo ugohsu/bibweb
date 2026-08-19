@@ -361,21 +361,49 @@ function capitalizeWord(w) {
 // {...} で囲まれた区間（BibTeXの大文字小文字保護）は中身に触れずそのまま残す。
 // protectInitials=true の場合、1文字語（人名のミドルネーム等のイニシャル）は冠詞 'a' 等との
 // 衝突による誤った小文字化の対象にしない（author フィールド向け）。
+//
+// {...} 保護区間の外にある単語について、大文字小文字の組みから2段階で判断する
+// （辞書を使わずに "PCAOB" のような頭字語や "McDonald" のような固有名詞を壊さないための
+// 措置）。
+// 1. 全部小文字・全部大文字の入力は大文字小文字の情報が失われているため区別できず、
+//    従来通り reflow（位置ベースの大文字化・冠詞小文字化）する。
+// 2. それ以外（大文字小文字が混在）で、かつ先頭・末尾・冠詞類を除く語がほぼ全部大文字
+//    始まりなら「すでに Title Case 化済み」とみなし、reflow を一切行わず元の表記を
+//    そのまま尊重する。
+// 3. 上記に該当しない混在ケース（センテンスケース等）は reflow するが、個々の単語が
+//    「位置ベースの大文字化では再現できない組み」（capitalizeWord を適用すると変わって
+//    しまう組み）を持つ場合は、その単語だけ reflow 対象から外して元の表記を保護する。
 function toTitleCase(title, protectInitials) {
   if (!title) return title;
   const parts = title.split(/(\{[^{}]*\})/g);
   const wordRe = /[A-Za-z][A-Za-z'’]*/g;
-  let totalWords = 0;
+  const words = [];
   for (const part of parts) {
     if (part.startsWith('{')) continue;
-    totalWords += (part.match(wordRe) || []).length;
+    words.push(...(part.match(wordRe) || []));
   }
+  const totalWords = words.length;
+  const allUpper = totalWords > 0 && words.every(w => w === w.toUpperCase());
+  const allLower = totalWords > 0 && words.every(w => w === w.toLowerCase());
+  const mixedCase = totalWords > 0 && !allUpper && !allLower;
+
+  const contentIdxs = [];
+  words.forEach((w, i) => {
+    if (i !== 0 && i !== totalWords - 1 && !TITLECASE_MINOR.has(w.toLowerCase())) {
+      contentIdxs.push(i);
+    }
+  });
+  const looksTitleCased = mixedCase && contentIdxs.length > 0 &&
+    contentIdxs.every(i => /[A-Z]/.test(words[i].charAt(0)));
+
   let seen = 0;
   return parts.map(part => {
     if (part.startsWith('{')) return part;
     return part.replace(wordRe, (w) => {
       seen++;
+      if (looksTitleCased) return w;
       const lower = w.toLowerCase();
+      if (mixedCase && w !== lower && w !== capitalizeWord(w)) return w;
       if (protectInitials && w.length === 1) return capitalizeWord(w);
       if (seen !== 1 && seen !== totalWords && TITLECASE_MINOR.has(lower)) return lower;
       return capitalizeWord(w);
