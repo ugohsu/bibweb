@@ -470,14 +470,39 @@ function escapeAmpersand(s) {
   return s.replace(UNESCAPED_AMP_RE, '\\&');
 }
 
-function cleanAndTitleCase(raw, protectInitials) {
+function cleanText(raw) {
   if (!raw) return raw;
   let s = decodeHtmlEntities(raw);
   s = s.replace(SCP_TAG_RE, (_, inner) => '{' + inner + '}');
   s = protectAmpAbbreviations(s);
   s = escapeAmpersand(s);
   s = s.replace(DECOR_TAG_RE, ' ').replace(/\s+/g, ' ').trim();
-  return toTitleCase(s, protectInitials);
+  return s;
+}
+
+function cleanAndTitleCase(raw, protectInitials) {
+  if (!raw) return raw;
+  return toTitleCase(cleanText(raw), protectInitials);
+}
+
+// author フィールド("Family, Given and Family, Given...")は、著者ごとに
+// family/given を個別にtitle case化してから結合する。全体を1つの文字列として
+// toTitleCase に通すと、Crossref由来のデータでfamily nameだけALL CAPSに
+// なっているケース(例: "STUBER, Sarah B.")が、他の著者の混在ケースの影響で
+// 「既にTitle Case済み」と誤判定され、ALL CAPSのfamily nameがそのまま
+// 素通りしてしまう(かえって悪化する)。著者・family/given単位で判定すれば、
+// 単独のALL CAPS語は正しくreflow対象になる。
+function formatAuthorField(raw) {
+  if (!raw) return raw;
+  const cleaned = cleanText(raw);
+  const authors = cleaned.split(/\s+and\s+/).map(entry => {
+    const idx = entry.indexOf(', ');
+    if (idx === -1) return toTitleCase(entry, true);
+    const family = entry.slice(0, idx);
+    const given = entry.slice(idx + 2);
+    return `${toTitleCase(family, false)}, ${toTitleCase(given, true)}`;
+  });
+  return authors.join(' and ');
 }
 
 // ─── citekey 生成 ────────────────────────────────────────────────────────────────
@@ -1388,7 +1413,7 @@ const app = createApp({
       }
       const fields = { ...parsed.fields };
       if (fields.title) fields.title = cleanAndTitleCase(fields.title);
-      if (fields.author) fields.author = cleanAndTitleCase(fields.author, true);
+      if (fields.author) fields.author = formatAuthorField(fields.author);
       if (fields.journal) fields.journal = cleanAndTitleCase(fields.journal);
       const citeKey = (addCitekeyTouched.value && addParsed.value)
         ? addParsed.value.cite_key
