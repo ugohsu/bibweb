@@ -357,6 +357,19 @@ function capitalizeWord(w) {
   ).join('-');
 }
 
+// "McDonald"・"O'Brien"のような姓は、CrossrefがALL CAPS/全部小文字で返すと大文字小文字の
+// 混在情報が失われ、capitalizeWordで"Mcdonald"/"O'brien"のように潰れてしまう（mixed_case
+// 判定は単語内の大文字小文字混在に依存するため、単語全体が単一の大文字小文字だと機能しない）。
+// authorフィールド専用の後処理として、Mc/O'の直後の文字を再度大文字化する。
+// Mac(Mackenzie等)は正当な非分割表記のバリエーションも多く誤検知のリスクが高いため対象外
+// （titleフィールドの一般英単語を壊すリスクを避けるため、この関数はtitleには適用しない）。
+const NAME_PREFIX_RE = /\b(Mc|O')([a-z])/g;
+
+function fixNamePrefixCasing(s) {
+  if (!s) return s;
+  return s.replace(NAME_PREFIX_RE, (_, prefix, c) => prefix + c.toUpperCase());
+}
+
 // 単語ごとに先頭を大文字化する（冠詞・短い前置詞・等位接続詞は先頭/末尾以外なら小文字のまま）。
 // {...} で囲まれた区間（BibTeXの大文字小文字保護）は中身に触れずそのまま残す。
 // protectInitials=true の場合、1文字語（人名のミドルネーム等のイニシャル）は冠詞 'a' 等との
@@ -497,10 +510,10 @@ function formatAuthorField(raw) {
   const cleaned = cleanText(raw);
   const authors = cleaned.split(/\s+and\s+/).map(entry => {
     const idx = entry.indexOf(', ');
-    if (idx === -1) return toTitleCase(entry, true);
+    if (idx === -1) return fixNamePrefixCasing(toTitleCase(entry, true));
     const family = entry.slice(0, idx);
     const given = entry.slice(idx + 2);
-    return `${toTitleCase(family, false)}, ${toTitleCase(given, true)}`;
+    return `${fixNamePrefixCasing(toTitleCase(family, false))}, ${fixNamePrefixCasing(toTitleCase(given, true))}`;
   });
   return authors.join(' and ');
 }
