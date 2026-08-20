@@ -498,6 +498,20 @@ function cleanAndTitleCase(raw, protectInitials) {
   return toTitleCase(cleanText(raw), protectInitials);
 }
 
+// Crossrefの生データ自体の誤記を人手で確認・修正した例外リスト（DOI小文字→正しいauthor値）。
+// 辞書ベースで姓を一般的に正規化する運用は誤検知リスクが高いため不採用（DECISIONS.md参照）だが、
+// 個別に人手で確認済みのケースはDOIをキーにピンポイントで上書きする。scripts/titlecase.py の
+// MANUAL_AUTHOR_OVERRIDESと同一内容、同期して保守すること。
+const MANUAL_AUTHOR_OVERRIDES = {
+  '10.2308/tar-4488012': "Hendrickson, Harvey S. and McIntyre, Edward V.", // Crossref生データは"MCLNTYRE"(lとIの誤字)。2026-08-20確認
+};
+
+function applyManualAuthorOverride(doi, authorField) {
+  if (!doi) return authorField;
+  const override = MANUAL_AUTHOR_OVERRIDES[doi.trim().toLowerCase()];
+  return override || authorField;
+}
+
 // author フィールド("Family, Given and Family, Given...")は、著者ごとに
 // family/given を個別にtitle case化してから結合する。全体を1つの文字列として
 // toTitleCase に通すと、Crossref由来のデータでfamily nameだけALL CAPSに
@@ -1428,6 +1442,7 @@ const app = createApp({
       if (fields.title) fields.title = cleanAndTitleCase(fields.title);
       if (fields.author) fields.author = formatAuthorField(fields.author);
       if (fields.journal) fields.journal = cleanAndTitleCase(fields.journal);
+      if (fields.author && fields.doi) fields.author = applyManualAuthorOverride(fields.doi, fields.author);
       const citeKey = (addCitekeyTouched.value && addParsed.value)
         ? addParsed.value.cite_key
         : makeCitekey(fields, existingKeySet());
