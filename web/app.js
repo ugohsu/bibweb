@@ -834,10 +834,7 @@ const app = createApp({
     const editingFigureMemo   = ref('');
     const lightboxFigureId    = ref(null);
 
-    // カスタムビュー（外部HTMLの表示）
-    const showCustomView       = ref(false);
-    const customViewHtml       = ref('');
-    const customViewFileName   = ref('');
+    // カスタムビュー（外部HTMLを別タブで表示）
     const customViewFileInputRef = ref(null);
 
     // Add entry (新規登録)
@@ -1408,15 +1405,19 @@ const app = createApp({
       lightboxFigureId.value = null;
     }
 
-    // ── Methods: カスタムビュー（外部HTMLの表示） ──────────────────────────
+    // ── Methods: カスタムビュー（外部HTMLを別タブで表示） ──────────────────
     // 文献横断的な分析ページ（マインドマップ・ダッシュボード等）を、各プロジェクト側で
     // 自己完結の単一HTMLとして生成してもらい、ここではその中身を解釈せずに表示するだけ。
     // <input type=file> でユーザーが選んだファイルをブラウザ内で読むだけなので、
     // サーバー側が任意のファイルパスを読みにいく実装（パストラバーサル等のリスク）を
-    // 増やさずに済む。表示は iframe の srcdoc に流し込む（サーバーへのアップロードなし）。
-    // srcdoc化されたiframe内の相対URL（例: <a href="/?entry=...">）は、仕様上「埋め込み元
-    // ページのURL」を基準に解決されるため、bibwebがどのポートで動いていてもそのまま
-    // bibweb自身に飛ぶ（ポート番号を書き込む必要がない）。
+    // 増やさずに済む。
+    //
+    // 表示は同一タブ内の iframe ではなく window.open + Blob URL による別タブとした
+    // （書誌が多い bibweb では、選んだ論文を毎回 /?entry=... へのフルページ遷移で
+    // 開くと loadEntries() のやり直し等で重く、固まったように見えるため）。Blob URL は
+    // 生成元（bibweb自身）と同一オリジン扱いになるので、window.opener 経由で
+    // postMessage を送れる。カスタムビュー側は postMessage で「このエントリを選んで」と
+    // 伝えるだけで、bibweb本体はページ遷移せずに selectEntry() を直接呼べる。
     function openCustomViewPicker() {
       customViewFileInputRef.value?.click();
     }
@@ -1425,13 +1426,24 @@ const app = createApp({
       const file = event.target.files?.[0];
       event.target.value = '';  // 同じファイルを選び直せるようにする
       if (!file) return;
-      customViewHtml.value = await readTextFile(file);
-      customViewFileName.value = file.name;
-      showCustomView.value = true;
+      const html = await readTextFile(file);
+      const blob = new Blob([html], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      // 同じ名前のターゲットを指定することで、開きっぱなしのタブがあれば使い回す
+      // （タブが積み上がらない）。
+      window.open(url, 'bibweb-custom-view');
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
     }
 
-    function closeCustomView() {
-      showCustomView.value = false;
+    // カスタムビュー（window.openで開いた別タブ）からの postMessage を受けて、
+    // ページ遷移なしで該当エントリを選択する。
+    function handleCustomViewMessage(event) {
+      if (event.origin !== location.origin) return;
+      if (event.data?.type !== 'bibweb:select-entry') return;
+      const key = event.data.cite_key;
+      if (key && entries.value.some(e => e.cite_key === key)) {
+        selectEntry(key);
+      }
     }
 
     // ── Methods: add entry (新規登録) ──────────────────────────────────────
@@ -1540,11 +1552,15 @@ const app = createApp({
       await loadTags();
 
       // ディープリンク: /?entry=<cite_key> で起動された場合、そのエントリを自動選択する。
-      // 外部の静的HTML（カスタムビュー等）から特定の論文へリンクするための入口。
+      // カスタムビューがwindow.openで開けなかった場合のフォールバック等、bibwebが
+      // まだ開いていない状態から特定の論文へ直接リンクするための入口。
       const entryParam = new URLSearchParams(location.search).get('entry');
       if (entryParam && entries.value.some(e => e.cite_key === entryParam)) {
         await selectEntry(entryParam);
       }
+
+      // カスタムビュー（別タブ）からの postMessage を受け取る。
+      window.addEventListener('message', handleCustomViewMessage);
     });
 
     return {
@@ -1557,7 +1573,7 @@ const app = createApp({
       editingExtraId, editingExtraVal, editingExtraNote, showNewExtra, newExtraKey, newExtraVal, newExtraNote,
       showMdAdd, mdAddKey, mdAddVal, mdAddNote, mdAddBusy,
       newFileUrl, newFileNote, editingFileNoteId, editingFileNoteVal,
-      showCustomView, customViewHtml, customViewFileName, customViewFileInputRef,
+      customViewFileInputRef,
       showAddEntry, addDoiInput, addBibText, addParsed, addBusy, addError,
       addMultiWarn, addCitekeyTouched, newAddFieldKey, newAddFieldVal,
       figures, figureBusy, editingFigureId, editingFigureLabel, editingFigureMemo,
@@ -1577,7 +1593,7 @@ const app = createApp({
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       openAddEntry, closeAddEntry, parseAddBibText, fetchDoiIntoBib,
       regenAddCitekey, removeAddField, addAddField, submitAddEntry,
-      openCustomViewPicker, handleCustomViewFileInput, closeCustomView,
+      openCustomViewPicker, handleCustomViewFileInput,
       figureImageUrl, handleFigurePaste, handleFigureDrop, handleFigureFileInput,
       startEditFigure, cancelFigureEdit, saveFigureEdit, deleteFigureNote, moveFigure,
       openFigureLightbox, closeFigureLightbox,
@@ -2059,15 +2075,6 @@ const app = createApp({
     <button class="modal-close figure-lightbox-close" @click="closeFigureLightbox" title="閉じる">✕</button>
   </div>
 
-  <!-- ── カスタムビュー（外部HTMLをiframeで表示） ── -->
-  <div v-if="showCustomView" class="custom-view-overlay">
-    <div class="custom-view-bar">
-      <span class="custom-view-filename" :title="customViewFileName">{{ customViewFileName }}</span>
-      <button class="modal-close" @click="closeCustomView" title="閉じる">✕</button>
-    </div>
-    <iframe class="custom-view-iframe" :srcdoc="customViewHtml"
-            sandbox="allow-scripts allow-top-navigation allow-popups allow-forms allow-modals"></iframe>
-  </div>
 
   <!-- ── Add entry modal ── -->
   <div v-if="showAddEntry" class="modal-overlay" @click.self="closeAddEntry">
