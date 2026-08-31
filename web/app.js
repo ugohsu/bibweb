@@ -834,6 +834,12 @@ const app = createApp({
     const editingFigureMemo   = ref('');
     const lightboxFigureId    = ref(null);
 
+    // カスタムビュー（外部HTMLの表示）
+    const showCustomView       = ref(false);
+    const customViewHtml       = ref('');
+    const customViewFileName   = ref('');
+    const customViewFileInputRef = ref(null);
+
     // Add entry (新規登録)
     const showAddEntry      = ref(false);
     const addDoiInput       = ref('');
@@ -1402,6 +1408,32 @@ const app = createApp({
       lightboxFigureId.value = null;
     }
 
+    // ── Methods: カスタムビュー（外部HTMLの表示） ──────────────────────────
+    // 文献横断的な分析ページ（マインドマップ・ダッシュボード等）を、各プロジェクト側で
+    // 自己完結の単一HTMLとして生成してもらい、ここではその中身を解釈せずに表示するだけ。
+    // <input type=file> でユーザーが選んだファイルをブラウザ内で読むだけなので、
+    // サーバー側が任意のファイルパスを読みにいく実装（パストラバーサル等のリスク）を
+    // 増やさずに済む。表示は iframe の srcdoc に流し込む（サーバーへのアップロードなし）。
+    // srcdoc化されたiframe内の相対URL（例: <a href="/?entry=...">）は、仕様上「埋め込み元
+    // ページのURL」を基準に解決されるため、bibwebがどのポートで動いていてもそのまま
+    // bibweb自身に飛ぶ（ポート番号を書き込む必要がない）。
+    function openCustomViewPicker() {
+      customViewFileInputRef.value?.click();
+    }
+
+    async function handleCustomViewFileInput(event) {
+      const file = event.target.files?.[0];
+      event.target.value = '';  // 同じファイルを選び直せるようにする
+      if (!file) return;
+      customViewHtml.value = await readTextFile(file);
+      customViewFileName.value = file.name;
+      showCustomView.value = true;
+    }
+
+    function closeCustomView() {
+      showCustomView.value = false;
+    }
+
     // ── Methods: add entry (新規登録) ──────────────────────────────────────
     function existingKeySet() {
       return new Set(entries.value.map(e => e.cite_key));
@@ -1506,6 +1538,13 @@ const app = createApp({
       dbPath.value = db.path;
       await loadEntries();
       await loadTags();
+
+      // ディープリンク: /?entry=<cite_key> で起動された場合、そのエントリを自動選択する。
+      // 外部の静的HTML（カスタムビュー等）から特定の論文へリンクするための入口。
+      const entryParam = new URLSearchParams(location.search).get('entry');
+      if (entryParam && entries.value.some(e => e.cite_key === entryParam)) {
+        await selectEntry(entryParam);
+      }
     });
 
     return {
@@ -1518,6 +1557,7 @@ const app = createApp({
       editingExtraId, editingExtraVal, editingExtraNote, showNewExtra, newExtraKey, newExtraVal, newExtraNote,
       showMdAdd, mdAddKey, mdAddVal, mdAddNote, mdAddBusy,
       newFileUrl, newFileNote, editingFileNoteId, editingFileNoteVal,
+      showCustomView, customViewHtml, customViewFileName, customViewFileInputRef,
       showAddEntry, addDoiInput, addBibText, addParsed, addBusy, addError,
       addMultiWarn, addCitekeyTouched, newAddFieldKey, newAddFieldVal,
       figures, figureBusy, editingFigureId, editingFigureLabel, editingFigureMemo,
@@ -1537,6 +1577,7 @@ const app = createApp({
       toggleTagFilter, clearTagFilter, addTag, removeTag, bulkAddTag,
       openAddEntry, closeAddEntry, parseAddBibText, fetchDoiIntoBib,
       regenAddCitekey, removeAddField, addAddField, submitAddEntry,
+      openCustomViewPicker, handleCustomViewFileInput, closeCustomView,
       figureImageUrl, handleFigurePaste, handleFigureDrop, handleFigureFileInput,
       startEditFigure, cancelFigureEdit, saveFigureEdit, deleteFigureNote, moveFigure,
       openFigureLightbox, closeFigureLightbox,
@@ -1555,6 +1596,9 @@ const app = createApp({
     <div class="header-left">
       <span class="header-title">bibweb</span>
       <button class="btn-add-entry" @click="openAddEntry">＋ 新規登録</button>
+      <button class="btn-add-entry" @click="openCustomViewPicker">📄 カスタムビューを開く</button>
+      <input ref="customViewFileInputRef" type="file" accept=".html,.htm" style="display:none"
+             @change="handleCustomViewFileInput">
     </div>
     <span class="header-db" :title="dbPath">{{ dbPath }}</span>
   </header>
@@ -2013,6 +2057,16 @@ const app = createApp({
   <div v-if="lightboxFigureId" class="modal-overlay figure-lightbox-overlay" @click.self="closeFigureLightbox">
     <img :src="figureImageUrl(lightboxFigureId)" class="figure-lightbox-img" alt="">
     <button class="modal-close figure-lightbox-close" @click="closeFigureLightbox" title="閉じる">✕</button>
+  </div>
+
+  <!-- ── カスタムビュー（外部HTMLをiframeで表示） ── -->
+  <div v-if="showCustomView" class="custom-view-overlay">
+    <div class="custom-view-bar">
+      <span class="custom-view-filename" :title="customViewFileName">{{ customViewFileName }}</span>
+      <button class="modal-close" @click="closeCustomView" title="閉じる">✕</button>
+    </div>
+    <iframe class="custom-view-iframe" :srcdoc="customViewHtml"
+            sandbox="allow-scripts allow-top-navigation allow-popups allow-forms allow-modals"></iframe>
   </div>
 
   <!-- ── Add entry modal ── -->
