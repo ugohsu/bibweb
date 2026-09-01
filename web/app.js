@@ -1897,23 +1897,23 @@ const app = createApp({
           <div v-show="advSearchOpen" class="adv-search-body">
             <label class="adv-field-row">
               <span class="adv-field-label">タイトル</span>
-              <input v-model="advFilters.title" class="adv-field-input"
-                     placeholder="例: disclosure | transparency（OR） / governance disclosure（AND）">
+              <input v-model="advFilters.title" type="search" class="adv-field-input">
+              <span class="adv-field-hint">例: disclosure | transparency（OR） / governance disclosure（AND）</span>
             </label>
             <label class="adv-field-row">
               <span class="adv-field-label">著者</span>
-              <input v-model="advFilters.author" class="adv-field-input"
-                     placeholder="例: Smith | Tanaka（OR） / Smith Tanaka（共著=AND）">
+              <input v-model="advFilters.author" type="search" class="adv-field-input">
+              <span class="adv-field-hint">例: Smith | Tanaka（OR） / Smith Tanaka（共著=AND）</span>
             </label>
             <label class="adv-field-row">
               <span class="adv-field-label">年</span>
-              <input v-model="advFilters.year" class="adv-field-input"
-                     placeholder="例: 2020 / 2015-2020 / 2020- / -2020 / 2020|2023（OR）">
+              <input v-model="advFilters.year" type="search" class="adv-field-input">
+              <span class="adv-field-hint">例: 2020 / 2015-2020 / 2020-（以降） / -2020（以前） / 2020|2023（OR）</span>
             </label>
             <label class="adv-field-row">
               <span class="adv-field-label">誌名</span>
-              <input v-model="advFilters.journal" class="adv-field-input"
-                     placeholder="例: Accounting Review | Journal of Finance（OR）">
+              <input v-model="advFilters.journal" type="search" class="adv-field-input">
+              <span class="adv-field-hint">例: Accounting Review | Journal of Finance（OR）</span>
             </label>
           </div>
         </div>
