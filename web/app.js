@@ -811,6 +811,12 @@ const app = createApp({
     const digestScrollMap = new Map(); // cite_key → scrollTop
     const digestPanelRef  = ref(null);
 
+    // 選択中のみ表示（サイドバーツールバー）: タグ・検索・詳細検索を切り替えながら
+    // チェックを積み重ねたあと、18,000件の中からチェック済みだけを見つけ直すのが
+    // 大変なため、母集団をチェック済みだけに絞るトグル。チェックが0件になったら
+    // 自動でOFFに戻す（空リストのままONが残るのを避ける）。
+    const showCheckedOnly = ref(false);
+
     // Tag filter (sidebar)
     const allTags       = ref([]);   // [{name, count}]
     const tagFilterOpen = ref(false);
@@ -937,8 +943,13 @@ const app = createApp({
     }
 
     const searchResults = computed(() => {
-      // 1. Tag filter (AND)
+      // 0. 選択中のみ表示
       let pool = entries.value;
+      if (showCheckedOnly.value) {
+        pool = pool.filter(e => checkedKeys.value.has(e.cite_key));
+      }
+
+      // 1. Tag filter (AND)
       if (selectedTags.value.size > 0) {
         pool = pool.filter(e => {
           const etags = new Set(e.tags ?? []);
@@ -1164,8 +1175,13 @@ const app = createApp({
     );
     // 検索条件が変わったときだけ一覧の先頭にスクロールし直す（entries 自体の更新
     // ―フィールド編集などーでは動かさない。selectedEntry の閲覧位置を保つため）。
-    watch([debouncedSearchQuery, sortMode, advFilterSignature], resetListScroll);
+    watch([debouncedSearchQuery, sortMode, advFilterSignature, showCheckedOnly], resetListScroll);
     watch(selectedTags, resetListScroll);
+
+    // 「選択のみ」表示中にチェックが0件になったら、空リストのまま残さず自動でOFFに戻す。
+    watch(checkedKeys, (keys) => {
+      if (showCheckedOnly.value && keys.size === 0) showCheckedOnly.value = false;
+    });
 
     // ── Methods: navigation ────────────────────────────────────────────────
     async function loadEntries() {
@@ -1788,6 +1804,7 @@ const app = createApp({
       activeTab, activeMdKey, dbPath,
       sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
+      showCheckedOnly,
       advSearchOpen, advFilters, advMode, advActiveCount, clearAdvFilters,
       listViewportRef, visibleRows, listInnerHeight, onListScroll, measureRowHeight,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
@@ -1929,8 +1946,12 @@ const app = createApp({
             <input type="checkbox" :checked="allChecked" @change="toggleAll">
             全選択
           </label>
+          <label class="check-all-label" v-if="checkedKeys.size > 0">
+            <input type="checkbox" v-model="showCheckedOnly">
+            選択のみ
+          </label>
           <button v-if="checkedKeys.size > 0" @click="checkedKeys = new Set()"
-                  class="deselect-btn">選択解除</button>
+                  class="deselect-btn" title="選択解除">✕</button>
           <span class="entry-count">{{ filteredEntries.length }} 件</span>
         </div>
       </div>
