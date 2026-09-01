@@ -1,6 +1,6 @@
 'use strict';
 
-const { createApp, ref, reactive, computed, watch, nextTick, onMounted } = Vue;
+const { createApp, ref, computed, watch, nextTick, onMounted } = Vue;
 
 // ─── PlantUML encoding ────────────────────────────────────────────────────────
 
@@ -802,9 +802,6 @@ const app = createApp({
     const checkedKeys   = ref(new Set());
     const activeTab     = ref('info');
     const activeMdKey   = ref(null);
-    // Markdownタブ: 一度描画したextra_idを覚えておき、以後はv-showで使い回して
-    // 再描画（marked/KaTeX/mermaidの再実行）を避ける（初回のみ描画コストを払う）。
-    const visitedMdKeys = reactive(new Set());
     const dbPath        = ref('');
 
     // Sort mode
@@ -1143,12 +1140,6 @@ const app = createApp({
         // ペーストゾーンにフォーカスして、タブを開いたらすぐ Ctrl+V できるようにする
         nextTick(() => figuresPanelRef.value?.focus());
       }
-    });
-
-    // Markdownタブで実際に開かれたキーだけを「描画対象」として記録する
-    // （visitedMdKeysに一度入ったキーはv-ifで永続的に描画され、以後v-showで使い回す）。
-    watch(activeMdKey, (id) => {
-      if (id != null) visitedMdKeys.add(id);
     });
 
     // ── Methods: 一覧の仮想スクロール ──────────────────────────────────────
@@ -1825,7 +1816,7 @@ const app = createApp({
     return {
       // state
       entries, selectedEntry, searchQuery, checkedKeys,
-      activeTab, activeMdKey, visitedMdKeys, dbPath,
+      activeTab, activeMdKey, dbPath,
       sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       showCheckedOnly,
@@ -2353,7 +2344,7 @@ const app = createApp({
       </div>
 
       <!-- ── Markdown tab ── -->
-      <div v-show="activeTab === 'markdown'" class="tab-content tab-content-md">
+      <div v-if="activeTab === 'markdown'" class="tab-content tab-content-md">
         <nav class="md-tab-bar" v-if="mdExtras.length > 1">
           <button v-for="x in mdExtras" :key="x.id"
                   class="md-tab-btn" :class="{ active: activeMdKey === x.id }"
@@ -2364,7 +2355,7 @@ const app = createApp({
         </nav>
 
         <template v-for="x in mdExtras" :key="x.id">
-          <div v-if="visitedMdKeys.has(x.id)" v-show="activeMdKey === x.id" class="md-viewer">
+          <div v-show="activeMdKey === x.id" class="md-viewer">
             <div v-if="x.note" class="md-note">{{ x.note }}</div>
             <markdown-renderer :content="x.extra_value"></markdown-renderer>
           </div>
