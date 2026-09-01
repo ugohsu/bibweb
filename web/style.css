@@ -795,24 +795,6 @@ body {
   padding: 4px 2px 8px;
 }
 
-.adv-mode-row {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 2px;
-}
-
-.adv-mode-option {
-  cursor: pointer;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  color: #757575;
-  user-select: none;
-}
-.adv-mode-option input { display: none; }
-.adv-mode-option.active { background: #e3f0fb; color: #1565c0; font-weight: 500; }
-.adv-mode-option:not(.active):hover { background: #f5f5f5; }
-
 .adv-field-row {
   display: flex;
   flex-direction: column;

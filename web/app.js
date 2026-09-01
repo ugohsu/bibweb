@@ -823,10 +823,11 @@ const app = createApp({
     const selectedTags  = ref(new Set());
 
     // 詳細検索（sidebar、既定は折りたたみ）: title/author/year/journal を個別指定して
-    // AND/OR で絞り込む。ここで母集団を絞ってから通常の曖昧検索をかけられるようにする。
+    // 絞り込む。フィールドをまたぐ組み合わせは常にAND、フィールド内の記法（|=OR、
+    // 半角スペース=AND）は matchesAdvancedFilters 側のコメント参照。ここで母集団を
+    // 絞ってから通常の曖昧検索をかけられるようにする。
     const advSearchOpen = ref(false);
     const advFilters     = ref({ title: '', author: '', year: '', journal: '' });
-    const advMode        = ref('AND');  // 'AND' | 'OR'
 
     // 一覧の仮想スクロール: 18,000件規模だと全件をDOMに描画するのが体感で一番重いため、
     // スクロール中に見えている範囲＋オーバースキャン分だけ <li> を描画する。
@@ -906,11 +907,21 @@ const app = createApp({
 
     // ── Computed ───────────────────────────────────────────────────────────
 
-    // 詳細検索: year だけは "2015-2020" のような範囲指定も受け付ける。
-    // それ以外（単発値）は部分一致。
-    function matchesYearFilter(yearFilterRaw, entryYear) {
-      const yf = yearFilterRaw.trim();
-      if (!yf) return true;
+    // 詳細検索の記法: フィールドをまたぐ組み合わせは常にAND（トグルなし）。
+    // 各フィールド内は「|」でOR、半角スペースでAND（例: 著者欄 "Smith | Tanaka" は
+    // どちらか、"Smith Tanaka" は共著）。author フィールドは "姓, 名" 形式でカンマを
+    // 使っているため、区切り文字はカンマではなく「|」を採用している。
+    function matchesTextField(filterRaw, lcHaystack) {
+      const groups = filterRaw.split('|').map(g => g.trim().toLowerCase()).filter(Boolean);
+      return groups.some(group =>
+        group.split(/\s+/).filter(Boolean).every(term => lcHaystack.includes(term))
+      );
+    }
+
+    // year は共著のような「両方」があり得ないため、フィールド内もスペースAND扱いはせず
+    // 「|」区切りのOR（各要素は単発値 or "2015-2020" 範囲、前後どちらかを省略した
+    // "2020-"（以降すべて）・"-2020"（以前すべて）も可）のみを受け付ける。
+    function matchesYearGroup(yf, entryYear) {
       const rangeMatch = /^(\d{4})?\s*-\s*(\d{4})?$/.exec(yf);
       if (rangeMatch) {
         const ey = parseInt((entryYear || '').match(/\d+/)?.[0] ?? '', 10);
@@ -923,6 +934,11 @@ const app = createApp({
       return (entryYear || '').includes(yf);
     }
 
+    function matchesYearFilter(yearFilterRaw, entryYear) {
+      const groups = yearFilterRaw.split('|').map(g => g.trim()).filter(Boolean);
+      return groups.some(g => matchesYearGroup(g, entryYear));
+    }
+
     const advActiveCount = computed(() =>
       Object.values(advFilters.value).filter(v => v.trim()).length
     );
@@ -930,12 +946,11 @@ const app = createApp({
     function matchesAdvancedFilters(e) {
       const f = advFilters.value;
       const checks = [];
-      if (f.title.trim())   checks.push(e._lcTitle.includes(f.title.trim().toLowerCase()));
-      if (f.author.trim())  checks.push(e._lcAuthor.includes(f.author.trim().toLowerCase()));
-      if (f.journal.trim()) checks.push((e.journal || '').toLowerCase().includes(f.journal.trim().toLowerCase()));
+      if (f.title.trim())   checks.push(matchesTextField(f.title, e._lcTitle));
+      if (f.author.trim())  checks.push(matchesTextField(f.author, e._lcAuthor));
+      if (f.journal.trim()) checks.push(matchesTextField(f.journal, (e.journal || '').toLowerCase()));
       if (f.year.trim())    checks.push(matchesYearFilter(f.year, e.year));
-      if (checks.length === 0) return true;
-      return advMode.value === 'AND' ? checks.every(Boolean) : checks.some(Boolean);
+      return checks.every(Boolean);
     }
 
     function clearAdvFilters() {
@@ -1171,7 +1186,7 @@ const app = createApp({
     // 詳細検索条件のオブジェクト全体を watch すると深い比較コストがかかるため、
     // 文字列に畳んでから比較する。
     const advFilterSignature = computed(() =>
-      `${advMode.value}|${advFilters.value.title}|${advFilters.value.author}|${advFilters.value.year}|${advFilters.value.journal}`
+      `${advFilters.value.title}|${advFilters.value.author}|${advFilters.value.year}|${advFilters.value.journal}`
     );
     // 検索条件が変わったときだけ一覧の先頭にスクロールし直す（entries 自体の更新
     // ―フィールド編集などーでは動かさない。selectedEntry の閲覧位置を保つため）。
@@ -1805,7 +1820,7 @@ const app = createApp({
       sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       showCheckedOnly,
-      advSearchOpen, advFilters, advMode, advActiveCount, clearAdvFilters,
+      advSearchOpen, advFilters, advActiveCount, clearAdvFilters,
       listViewportRef, visibleRows, listInnerHeight, onListScroll, measureRowHeight,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, editingExtraNote, showNewExtra, newExtraKey, newExtraVal, newExtraNote,
@@ -1880,29 +1895,25 @@ const app = createApp({
             </span>
           </button>
           <div v-show="advSearchOpen" class="adv-search-body">
-            <div class="adv-mode-row">
-              <label class="adv-mode-option" :class="{ active: advMode === 'AND' }">
-                <input type="radio" v-model="advMode" value="AND">AND
-              </label>
-              <label class="adv-mode-option" :class="{ active: advMode === 'OR' }">
-                <input type="radio" v-model="advMode" value="OR">OR
-              </label>
-            </div>
             <label class="adv-field-row">
               <span class="adv-field-label">タイトル</span>
-              <input v-model="advFilters.title" class="adv-field-input" placeholder="部分一致">
+              <input v-model="advFilters.title" class="adv-field-input"
+                     placeholder="例: disclosure | transparency（OR） / governance disclosure（AND）">
             </label>
             <label class="adv-field-row">
               <span class="adv-field-label">著者</span>
-              <input v-model="advFilters.author" class="adv-field-input" placeholder="部分一致">
+              <input v-model="advFilters.author" class="adv-field-input"
+                     placeholder="例: Smith | Tanaka（OR） / Smith Tanaka（共著=AND）">
             </label>
             <label class="adv-field-row">
               <span class="adv-field-label">年</span>
-              <input v-model="advFilters.year" class="adv-field-input" placeholder="例: 2020 / 2015-2020">
+              <input v-model="advFilters.year" class="adv-field-input"
+                     placeholder="例: 2020 / 2015-2020 / 2020- / -2020 / 2020|2023（OR）">
             </label>
             <label class="adv-field-row">
               <span class="adv-field-label">誌名</span>
-              <input v-model="advFilters.journal" class="adv-field-input" placeholder="部分一致">
+              <input v-model="advFilters.journal" class="adv-field-input"
+                     placeholder="例: Accounting Review | Journal of Finance（OR）">
             </label>
           </div>
         </div>
