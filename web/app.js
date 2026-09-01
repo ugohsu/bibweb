@@ -143,6 +143,9 @@ const api = {
   async getEntry(key) {
     return (await fetch(`/api/entries/${encodeURIComponent(key)}`)).json();
   },
+  async getEntrySummary(key) {
+    return (await fetch(`/api/entries/${encodeURIComponent(key)}/summary`)).json();
+  },
   async getDb() {
     return (await fetch('/api/db')).json();
   },
@@ -682,23 +685,29 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function fuzzyMatch(pattern, str) {
-  const lower = str.toLowerCase();
-  const pat   = pattern.toLowerCase();
+// str・pattern がすでに小文字化済みの場合のコア実装。18,000件規模のリストを
+// 1キー入力ごとに全走査する searchResults computed から使う場合、entry側の
+// toLowerCase() をここで毎回やり直すと重いため、事前計算済みの文字列を渡せるようにする
+// （decorateEntryForSearch 参照）。
+function fuzzyMatchLower(patLower, strLower) {
   const positions = [];
   let pi = 0, score = 0, consecutive = 0, lastSi = -1;
 
-  for (let si = 0; si < lower.length && pi < pat.length; si++) {
-    if (lower[si] === pat[pi]) {
+  for (let si = 0; si < strLower.length && pi < patLower.length; si++) {
+    if (strLower[si] === patLower[pi]) {
       consecutive = (lastSi === si - 1) ? consecutive + 1 : 1;
-      const wordStart = si === 0 || /[\s\-_\/\.]/.test(lower[si - 1]);
+      const wordStart = si === 0 || /[\s\-_\/\.]/.test(strLower[si - 1]);
       score += consecutive * 2 + (wordStart ? 8 : 1);
       positions.push(si);
       lastSi = si;
       pi++;
     }
   }
-  return pi === pat.length ? { score, positions } : null;
+  return pi === patLower.length ? { score, positions } : null;
+}
+
+function fuzzyMatch(pattern, str) {
+  return fuzzyMatchLower(pattern.toLowerCase(), str.toLowerCase());
 }
 
 function highlight(str, positions) {
@@ -750,6 +759,17 @@ function firstAuthor(author) {
   return author.split(/\s+and\s+/i)[0].trim();
 }
 
+// searchResults computed はキー入力のたびに全エントリを曖昧検索で走査するため、
+// entry.title.toLowerCase() 等を都度呼ぶコストがそのまま毎回乗ってしまう。
+// エントリ取得・更新のタイミングで一度だけ小文字化しておき、検索時は使い回す。
+function decorateEntryForSearch(e) {
+  e._lcCiteKey = (e.cite_key || '').toLowerCase();
+  e._lcTitle   = (e.title    || '').toLowerCase();
+  e._lcAuthor  = (e.author   || '').toLowerCase();
+  e._lcYomi    = (e.yomi     || '').toLowerCase();
+  return e;
+}
+
 function downloadBlob(content, filename, type = 'text/plain') {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -770,6 +790,15 @@ const app = createApp({
     const entries       = ref([]);
     const selectedEntry = ref(null);
     const searchQuery   = ref('');
+    // 曖昧検索は18,000件規模だと1文字ごとの全走査が体感できるほど重いため、
+    // 検索ボックス自体は即時反映（v-model）にしたまま、実際に走査する側だけ
+    // わずかにデバウンスする（入力の遅延感は出ないが、走査回数は大きく減る）。
+    const debouncedSearchQuery = ref('');
+    let searchDebounceTimer = null;
+    watch(searchQuery, (val) => {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => { debouncedSearchQuery.value = val; }, 120);
+    });
     const checkedKeys   = ref(new Set());
     const activeTab     = ref('info');
     const activeMdKey   = ref(null);
@@ -786,6 +815,26 @@ const app = createApp({
     const allTags       = ref([]);   // [{name, count}]
     const tagFilterOpen = ref(false);
     const selectedTags  = ref(new Set());
+
+    // 詳細検索（sidebar、既定は折りたたみ）: title/author/year/journal を個別指定して
+    // AND/OR で絞り込む。ここで母集団を絞ってから通常の曖昧検索をかけられるようにする。
+    const advSearchOpen = ref(false);
+    const advFilters     = ref({ title: '', author: '', year: '', journal: '' });
+    const advMode        = ref('AND');  // 'AND' | 'OR'
+
+    // 一覧の仮想スクロール: 18,000件規模だと全件をDOMに描画するのが体感で一番重いため、
+    // スクロール中に見えている範囲＋オーバースキャン分だけ <li> を描画する。
+    // 行の高さはタグの有無等で可変なので、実測してキャッシュし、以後はキャッシュ値
+    // （未計測なら DEFAULT_ROW_HEIGHT）を使ってオフセットを計算する。
+    const listViewportRef = ref(null);
+    const scrollTop       = ref(0);
+    const viewportHeight  = ref(0);
+    const rowHeights      = new Map();  // cite_key → 実測高さ(px)。描画には使うがVueリアクティブ対象外。
+    const heightsVersion  = ref(0);     // rowHeights 更新をcomputedに伝えるためのトリガ
+    const DEFAULT_ROW_HEIGHT = 76;
+    const ROW_OVERSCAN = 10;
+    let heightsBumpScheduled = false;
+    let listResizeObserver = null;
 
     // Tag editing (Tags tab)
     const newTagInput   = ref('');
@@ -851,6 +900,42 @@ const app = createApp({
 
     // ── Computed ───────────────────────────────────────────────────────────
 
+    // 詳細検索: year だけは "2015-2020" のような範囲指定も受け付ける。
+    // それ以外（単発値）は部分一致。
+    function matchesYearFilter(yearFilterRaw, entryYear) {
+      const yf = yearFilterRaw.trim();
+      if (!yf) return true;
+      const rangeMatch = /^(\d{4})?\s*-\s*(\d{4})?$/.exec(yf);
+      if (rangeMatch) {
+        const ey = parseInt((entryYear || '').match(/\d+/)?.[0] ?? '', 10);
+        if (!Number.isFinite(ey)) return false;
+        const [, fromS, toS] = rangeMatch;
+        if (fromS && ey < parseInt(fromS, 10)) return false;
+        if (toS && ey > parseInt(toS, 10)) return false;
+        return true;
+      }
+      return (entryYear || '').includes(yf);
+    }
+
+    const advActiveCount = computed(() =>
+      Object.values(advFilters.value).filter(v => v.trim()).length
+    );
+
+    function matchesAdvancedFilters(e) {
+      const f = advFilters.value;
+      const checks = [];
+      if (f.title.trim())   checks.push(e._lcTitle.includes(f.title.trim().toLowerCase()));
+      if (f.author.trim())  checks.push(e._lcAuthor.includes(f.author.trim().toLowerCase()));
+      if (f.journal.trim()) checks.push((e.journal || '').toLowerCase().includes(f.journal.trim().toLowerCase()));
+      if (f.year.trim())    checks.push(matchesYearFilter(f.year, e.year));
+      if (checks.length === 0) return true;
+      return advMode.value === 'AND' ? checks.every(Boolean) : checks.some(Boolean);
+    }
+
+    function clearAdvFilters() {
+      advFilters.value = { title: '', author: '', year: '', journal: '' };
+    }
+
     const searchResults = computed(() => {
       // 1. Tag filter (AND)
       let pool = entries.value;
@@ -861,8 +946,14 @@ const app = createApp({
         });
       }
 
-      // 2. Fuzzy search
-      const q = searchQuery.value.trim();
+      // 2. 詳細検索（title/author/year/journal・AND/OR）で母集団を絞る。
+      //    ここで絞ってから曖昧検索をかけるので、詳細検索を使うほど3の走査コストも下がる。
+      if (advActiveCount.value > 0) {
+        pool = pool.filter(matchesAdvancedFilters);
+      }
+
+      // 3. Fuzzy search（デバウンス済みクエリを使用。事前計算済みの小文字化文字列で走査する）
+      const q = debouncedSearchQuery.value.trim();
       if (!q) {
         const sorted = sortMode.value === 'added_at'
           ? [...pool].sort((a, b) => (b.added_at || '').localeCompare(a.added_at || ''))
@@ -878,12 +969,13 @@ const app = createApp({
         }));
       }
 
+      const patLower = q.toLowerCase();
       return pool
         .map(e => {
-          const km = fuzzyMatch(q, e.cite_key || '');
-          const tm = fuzzyMatch(q, e.title    || '');
-          const am = fuzzyMatch(q, e.author   || '');
-          const ym = fuzzyMatch(q, e.yomi     || '');
+          const km = fuzzyMatchLower(patLower, e._lcCiteKey);
+          const tm = fuzzyMatchLower(patLower, e._lcTitle);
+          const am = fuzzyMatchLower(patLower, e._lcAuthor);
+          const ym = fuzzyMatchLower(patLower, e._lcYomi);
           const score =
             (km?.score ?? 0) * 3 +
             (tm?.score ?? 0) * 2 +
@@ -908,6 +1000,52 @@ const app = createApp({
     });
 
     const filteredEntries = computed(() => searchResults.value.map(r => r.entry));
+
+    // ── Computed: 一覧の仮想スクロール ─────────────────────────────────────
+    function findRowIndexAtOffset(offsets, target) {
+      // offsets[i] <= target を満たす最大の i を二分探索で求める
+      let lo = 0, hi = offsets.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (offsets[mid] <= target) lo = mid; else hi = mid - 1;
+      }
+      return lo;
+    }
+
+    const rowOffsets = computed(() => {
+      heightsVersion.value; // rowHeights の更新を検知するための依存
+      const list = searchResults.value;
+      const offsets = new Array(list.length + 1);
+      offsets[0] = 0;
+      for (let i = 0; i < list.length; i++) {
+        offsets[i + 1] = offsets[i] + (rowHeights.get(list[i].entry.cite_key) ?? DEFAULT_ROW_HEIGHT);
+      }
+      return offsets;
+    });
+
+    const totalListHeight = computed(() => rowOffsets.value[rowOffsets.value.length - 1] || 0);
+
+    const listInnerHeight = computed(() =>
+      searchResults.value.length === 0 ? 'auto' : totalListHeight.value + 'px'
+    );
+
+    const visibleRows = computed(() => {
+      const offsets = rowOffsets.value;
+      const n = offsets.length - 1;
+      if (n === 0) return [];
+      const top    = Math.max(0, Math.min(scrollTop.value, offsets[n]));
+      const bottom = top + (viewportHeight.value || 600);
+      let start = findRowIndexAtOffset(offsets, top);
+      let end   = findRowIndexAtOffset(offsets, bottom) + 1;
+      start = Math.max(0, start - ROW_OVERSCAN);
+      end   = Math.min(n, end + ROW_OVERSCAN);
+      const list = searchResults.value;
+      const rows = [];
+      for (let i = start; i < end; i++) {
+        rows.push({ r: list[i], top: offsets[i] });
+      }
+      return rows;
+    });
 
     const mdExtras = computed(() =>
       (selectedEntry.value?.extras ?? []).filter(x => x.extra_key.startsWith('md.'))
@@ -978,9 +1116,60 @@ const app = createApp({
       }
     });
 
+    // ── Methods: 一覧の仮想スクロール ──────────────────────────────────────
+    function scheduleHeightsVersionBump() {
+      if (heightsBumpScheduled) return;
+      heightsBumpScheduled = true;
+      nextTick(() => {
+        heightsBumpScheduled = false;
+        heightsVersion.value++;
+      });
+    }
+
+    // 描画された <li> の実測高さをキャッシュする（タグ有無・タイトルの折返し等で
+    // 行の高さが一定でないため、推定値 DEFAULT_ROW_HEIGHT を実測値で補正していく）。
+    function measureRowHeight(el, key) {
+      if (!el) return;
+      const h = el.offsetHeight;
+      if (h > 0 && rowHeights.get(key) !== h) {
+        rowHeights.set(key, h);
+        scheduleHeightsVersionBump();
+      }
+    }
+
+    // タグの追加・削除など、行の高さが変わりうる更新のあとに呼び、再計測させる。
+    function invalidateRowHeight(key) {
+      if (rowHeights.delete(key)) scheduleHeightsVersionBump();
+    }
+
+    let scrollRaf = null;
+    function onListScroll(e) {
+      const el = e.target;
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollTop.value = el.scrollTop;
+        scrollRaf = null;
+      });
+    }
+
+    function resetListScroll() {
+      scrollTop.value = 0;
+      if (listViewportRef.value) listViewportRef.value.scrollTop = 0;
+    }
+
+    // 詳細検索条件のオブジェクト全体を watch すると深い比較コストがかかるため、
+    // 文字列に畳んでから比較する。
+    const advFilterSignature = computed(() =>
+      `${advMode.value}|${advFilters.value.title}|${advFilters.value.author}|${advFilters.value.year}|${advFilters.value.journal}`
+    );
+    // 検索条件が変わったときだけ一覧の先頭にスクロールし直す（entries 自体の更新
+    // ―フィールド編集などーでは動かさない。selectedEntry の閲覧位置を保つため）。
+    watch([debouncedSearchQuery, sortMode, advFilterSignature], resetListScroll);
+    watch(selectedTags, resetListScroll);
+
     // ── Methods: navigation ────────────────────────────────────────────────
     async function loadEntries() {
-      entries.value = await api.getEntries();
+      entries.value = (await api.getEntries()).map(decorateEntryForSearch);
     }
 
     async function loadTags() {
@@ -1009,9 +1198,20 @@ const app = createApp({
 
     async function refreshEntry() {
       if (!selectedEntry.value) return;
-      selectedEntry.value = await api.getEntry(selectedEntry.value.cite_key);
-      const idx = entries.value.findIndex(e => e.cite_key === selectedEntry.value.cite_key);
-      if (idx >= 0) entries.value = await api.getEntries();
+      const key = selectedEntry.value.cite_key;
+      selectedEntry.value = await api.getEntry(key);
+      // 18,000件規模だと1件の編集のたびに一覧を全件再取得・再ソートするのは重いため、
+      // 更新後のこの1行だけをサーバーから取り直して差し替える（並び順は次回の一覧
+      // 再取得まで追従しない。title/author/yomi の編集で並び順が変わりうるケースは
+      // 稀なため許容している）。
+      const idx = entries.value.findIndex(e => e.cite_key === key);
+      if (idx >= 0) {
+        const summary = await api.getEntrySummary(key);
+        if (summary) {
+          entries.value[idx] = decorateEntryForSearch(summary);
+          invalidateRowHeight(key);  // タグ・md.* 有無等で行の高さが変わりうるため再計測させる
+        }
+      }
     }
 
     function resetEditing() {
@@ -1085,7 +1285,15 @@ const app = createApp({
       const result = await r.json();
       if (result.error) { alert(result.error); return; }
       bulkTagInput.value = '';
-      await loadEntries();
+      // 選択件数が多いと一覧の全件再取得は重いため、サーバー側と同じロジック
+      // （すでに付いていれば何もしない）でローカルの entries に直接タグを反映する。
+      const keySet = new Set(keys);
+      for (const e of entries.value) {
+        if (keySet.has(e.cite_key) && !(e.tags ?? []).includes(name)) {
+          e.tags = [...(e.tags ?? []), name].sort();
+          invalidateRowHeight(e.cite_key);
+        }
+      }
       await loadTags();
       if (selectedEntry.value && checkedKeys.value.has(selectedEntry.value.cite_key)) {
         selectedEntry.value = await api.getEntry(selectedEntry.value.cite_key);
@@ -1561,6 +1769,17 @@ const app = createApp({
 
       // カスタムビュー（別タブ）からの postMessage を受け取る。
       window.addEventListener('message', handleCustomViewMessage);
+
+      // 一覧の仮想スクロール: 表示領域の高さをサイドバーのレイアウトから実測する
+      // （ウィンドウリサイズにも追従させる）。
+      await nextTick();
+      if (listViewportRef.value) {
+        viewportHeight.value = listViewportRef.value.clientHeight;
+        listResizeObserver = new ResizeObserver(() => {
+          if (listViewportRef.value) viewportHeight.value = listViewportRef.value.clientHeight;
+        });
+        listResizeObserver.observe(listViewportRef.value);
+      }
     });
 
     return {
@@ -1569,6 +1788,8 @@ const app = createApp({
       activeTab, activeMdKey, dbPath,
       sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
+      advSearchOpen, advFilters, advMode, advActiveCount, clearAdvFilters,
+      listViewportRef, visibleRows, listInnerHeight, onListScroll, measureRowHeight,
       editingFieldKey, editingFieldVal, showNewField, newFieldKey, newFieldVal,
       editingExtraId, editingExtraVal, editingExtraNote, showNewExtra, newExtraKey, newExtraVal, newExtraNote,
       showMdAdd, mdAddKey, mdAddVal, mdAddNote, mdAddBusy,
@@ -1627,6 +1848,48 @@ const app = createApp({
         <input v-model="searchQuery" type="search" placeholder="検索 (CiteKey / タイトル / 著者)"
                class="search-input">
 
+        <!-- 詳細検索アコーディオン: title/author/year/journal を個別指定してAND/OR絞り込み。
+             ここで母集団を絞ってから上の検索ボックスで曖昧検索をかけられる。 -->
+        <div class="tag-filter">
+          <button class="tag-filter-header" @click="advSearchOpen = !advSearchOpen">
+            <span class="tag-filter-label">
+              詳細検索
+              <span v-if="advActiveCount > 0" class="tag-active-count">{{ advActiveCount }}</span>
+            </span>
+            <span class="tag-filter-actions">
+              <span v-if="advActiveCount > 0" class="tag-clear-btn"
+                    @click.stop="clearAdvFilters()" title="条件をクリア">✕</span>
+              <span class="tag-filter-chevron" :class="{ open: advSearchOpen }">›</span>
+            </span>
+          </button>
+          <div v-show="advSearchOpen" class="adv-search-body">
+            <div class="adv-mode-row">
+              <label class="adv-mode-option" :class="{ active: advMode === 'AND' }">
+                <input type="radio" v-model="advMode" value="AND">AND
+              </label>
+              <label class="adv-mode-option" :class="{ active: advMode === 'OR' }">
+                <input type="radio" v-model="advMode" value="OR">OR
+              </label>
+            </div>
+            <label class="adv-field-row">
+              <span class="adv-field-label">タイトル</span>
+              <input v-model="advFilters.title" class="adv-field-input" placeholder="部分一致">
+            </label>
+            <label class="adv-field-row">
+              <span class="adv-field-label">著者</span>
+              <input v-model="advFilters.author" class="adv-field-input" placeholder="部分一致">
+            </label>
+            <label class="adv-field-row">
+              <span class="adv-field-label">年</span>
+              <input v-model="advFilters.year" class="adv-field-input" placeholder="例: 2020 / 2015-2020">
+            </label>
+            <label class="adv-field-row">
+              <span class="adv-field-label">誌名</span>
+              <input v-model="advFilters.journal" class="adv-field-input" placeholder="部分一致">
+            </label>
+          </div>
+        </div>
+
         <!-- Tag filter accordion -->
         <div v-if="allTags.length > 0" class="tag-filter">
           <button class="tag-filter-header" @click="tagFilterOpen = !tagFilterOpen">
@@ -1672,26 +1935,33 @@ const app = createApp({
         </div>
       </div>
 
-      <ul class="entry-list">
-        <li v-for="r in searchResults" :key="r.entry.cite_key"
+      <!-- 仮想スクロール: 検索結果全件ではなく、見えている範囲＋オーバースキャン分だけ
+           <li> を描画する（18,000件規模だとDOM描画そのものが最大のボトルネックのため）。
+           <ul> 自体の高さは全件分の高さに固定し、各行は実測高さの累積オフセットで
+           絶対配置する。行の高さは measureRowHeight で実測してキャッシュに反映する。 -->
+      <ul class="entry-list" ref="listViewportRef" @scroll="onListScroll"
+          :style="{ position: 'relative', height: listInnerHeight }">
+        <li v-for="row in visibleRows" :key="row.r.entry.cite_key"
             class="entry-item"
-            :class="{ selected: selectedEntry && selectedEntry.cite_key === r.entry.cite_key }"
-            @click="selectEntry(r.entry.cite_key)">
+            :class="{ selected: selectedEntry && selectedEntry.cite_key === row.r.entry.cite_key }"
+            :style="{ position: 'absolute', top: row.top + 'px', left: 0, right: 0 }"
+            :ref="el => measureRowHeight(el, row.r.entry.cite_key)"
+            @click="selectEntry(row.r.entry.cite_key)">
           <input type="checkbox" class="entry-check"
-                 :checked="checkedKeys.has(r.entry.cite_key)"
-                 @click="toggleCheck(r.entry.cite_key, $event)">
+                 :checked="checkedKeys.has(row.r.entry.cite_key)"
+                 @click="toggleCheck(row.r.entry.cite_key, $event)">
           <div class="entry-info">
             <div class="entry-key">
-              <span v-html="r.hl.cite_key"></span>
-              <span class="entry-type-pill">{{ r.entry.entry_type }}</span>
+              <span v-html="row.r.hl.cite_key"></span>
+              <span class="entry-type-pill">{{ row.r.entry.entry_type }}</span>
             </div>
-            <div class="entry-title" v-html="r.hl.title || '(no title)'"></div>
+            <div class="entry-title" v-html="row.r.hl.title || '(no title)'"></div>
             <div class="entry-meta">
-              <span v-html="r.hl.author"></span>
-              <template v-if="r.entry.year"> · {{ r.entry.year }}</template>
+              <span v-html="row.r.hl.author"></span>
+              <template v-if="row.r.entry.year"> · {{ row.r.entry.year }}</template>
             </div>
-            <div class="entry-tags" v-if="r.entry.tags && r.entry.tags.length > 0">
-              <span v-for="tag in r.entry.tags" :key="tag"
+            <div class="entry-tags" v-if="row.r.entry.tags && row.r.entry.tags.length > 0">
+              <span v-for="tag in row.r.entry.tags" :key="tag"
                     class="entry-tag-pill"
                     @click.stop="toggleTagFilter(tag)">{{ tag }}</span>
             </div>

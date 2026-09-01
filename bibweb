@@ -105,20 +105,26 @@ def _entry_sort_key(entry):
     return (name, year, title)
 
 
+# 一覧表示用のピボットクエリ本体（list_entries と get_entry_summary で共有）。
+# フロント側でエントリ更新時に18,000件全体を再取得せず、この1件版だけ叩けるように
+# get_entry_summary を用意している（詳細は get_entry_summary のコメント参照）。
+_ENTRY_SUMMARY_SQL = """
+    SELECT e.id, e.cite_key, e.entry_type, e.added_at,
+           MAX(CASE WHEN f.field_key = 'title'    THEN f.field_value END) AS title,
+           MAX(CASE WHEN f.field_key = 'author'   THEN f.field_value END) AS author,
+           MAX(CASE WHEN f.field_key = 'year'     THEN f.field_value END) AS year,
+           MAX(CASE WHEN f.field_key = 'yomi'     THEN f.field_value END) AS yomi,
+           MAX(CASE WHEN f.field_key = 'language' THEN f.field_value END) AS language,
+           MAX(CASE WHEN f.field_key = 'doi'      THEN f.field_value END) AS doi,
+           MAX(CASE WHEN f.field_key = 'journal'  THEN f.field_value END) AS journal
+    FROM entries e
+    LEFT JOIN fields f ON f.entry_id = e.id
+"""
+
+
 def list_entries(db_path):
     with get_conn(db_path) as conn:
-        rows = conn.execute("""
-            SELECT e.id, e.cite_key, e.entry_type, e.added_at,
-                   MAX(CASE WHEN f.field_key = 'title'    THEN f.field_value END) AS title,
-                   MAX(CASE WHEN f.field_key = 'author'   THEN f.field_value END) AS author,
-                   MAX(CASE WHEN f.field_key = 'year'     THEN f.field_value END) AS year,
-                   MAX(CASE WHEN f.field_key = 'yomi'     THEN f.field_value END) AS yomi,
-                   MAX(CASE WHEN f.field_key = 'language' THEN f.field_value END) AS language,
-                   MAX(CASE WHEN f.field_key = 'doi'      THEN f.field_value END) AS doi
-            FROM entries e
-            LEFT JOIN fields f ON f.entry_id = e.id
-            GROUP BY e.id
-        """).fetchall()
+        rows = conn.execute(_ENTRY_SUMMARY_SQL + " GROUP BY e.id").fetchall()
         entries = [dict(r) for r in rows]
         tag_rows = conn.execute(
             "SELECT entry_id, extra_value FROM extras WHERE extra_key = 'tags'"
@@ -130,6 +136,26 @@ def list_entries(db_path):
             e["tags"] = sorted(tags_by_id.get(e["id"], []))
         entries.sort(key=_entry_sort_key)
         return entries
+
+
+def get_entry_summary(db_path, cite_key):
+    """list_entries が返す1行分だけを取得する。フロントがフィールド/タグ等を
+    1件更新したあとの再取得に使い、書誌数が多いDBで毎回18,000件を再取得・再ソート
+    せずに済むようにする（一覧の並び順はその場では更新されないが、次回の一覧再取得
+    時に追従する）。"""
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            _ENTRY_SUMMARY_SQL + " WHERE e.cite_key = ? GROUP BY e.id", (cite_key,)
+        ).fetchone()
+        if not row:
+            return None
+        entry = dict(row)
+        tag_rows = conn.execute(
+            "SELECT extra_value FROM extras WHERE entry_id = ? AND extra_key = 'tags'",
+            (entry["id"],)
+        ).fetchall()
+        entry["tags"] = sorted(tr["extra_value"] for tr in tag_rows)
+        return entry
 
 
 def get_entry(db_path, cite_key):
@@ -719,6 +745,14 @@ class BibWebHandler(BaseHTTPRequestHandler):
                     self.send_error_json(404, "Entry not found")
                 else:
                     self.send_json(figures)
+            # /api/entries/{key}/summary — 一覧1行分のみ（全件再取得を避けるための軽量版）
+            elif len(parts) == 5 and parts[4] == "summary":
+                cite_key = unquote(parts[3])
+                summary = get_entry_summary(self.db_path, cite_key)
+                if summary:
+                    self.send_json(summary)
+                else:
+                    self.send_error_json(404, "Entry not found")
             # /api/entries/{key}/local-file/{extra_key}
             elif len(parts) == 6 and parts[4] == "local-file":
                 cite_key = unquote(parts[3])

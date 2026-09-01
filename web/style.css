@@ -788,6 +788,53 @@ body {
   padding: 0 5px;
 }
 
+/* ─── 詳細検索アコーディオン ─────────────────────────────────────────────────── */
+.adv-search-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px 8px;
+}
+
+.adv-mode-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.adv-mode-option {
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #757575;
+  user-select: none;
+}
+.adv-mode-option input { display: none; }
+.adv-mode-option.active { background: #e3f0fb; color: #1565c0; font-weight: 500; }
+.adv-mode-option:not(.active):hover { background: #f5f5f5; }
+
+.adv-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.adv-field-label {
+  font-size: 11px;
+  color: #9e9e9e;
+}
+
+.adv-field-input {
+  padding: 5px 8px;
+  border: 1px solid #bdbdbd;
+  border-radius: 5px;
+  font-size: 12px;
+  outline: none;
+  background: #fafafa;
+}
+.adv-field-input:focus { border-color: #1565c0; background: #fff; }
+
 /* ─── Sort selector ─────────────────────────────────────────────────────────── */
 
 .sort-selector {
