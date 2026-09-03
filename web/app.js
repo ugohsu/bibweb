@@ -22,7 +22,12 @@ function encodePlantUML(code) {
 
 // ─── Markdown rendering ───────────────────────────────────────────────────────
 
-function renderMarkdown(text, container) {
+// content文字列 → 描画済みinnerHTML（mermaidのSVG化まで完了した状態）のキャッシュ。
+// Markdownタブは再訪のたびにmarked/KaTeX/mermaidを再実行すると重いため、同じ内容は
+// 一度描画したHTMLを使い回す。mermaidはSVGとして確定済みなので再実行不要。
+const markdownRenderCache = new Map();
+
+async function renderMarkdown(text, container) {
   if (!text || !container) return;
 
   marked.setOptions({ gfm: true, breaks: true });
@@ -116,7 +121,7 @@ function renderMarkdown(text, container) {
       div.textContent = mermaidBlocks[idx];
       placeholder.replaceWith(div);
     });
-    mermaid.run({ nodes: container.querySelectorAll('.mermaid') }).catch(() => {});
+    await mermaid.run({ nodes: container.querySelectorAll('.mermaid') }).catch(() => {});
   }
 }
 
@@ -130,7 +135,18 @@ const MarkdownRenderer = {
     content() { nextTick(() => this.render()); },
   },
   methods: {
-    render() { renderMarkdown(this.content, this.$refs.container); },
+    async render() {
+      const container = this.$refs.container;
+      if (!container) return;
+      if (!this.content) { container.innerHTML = ''; return; }
+      const cached = markdownRenderCache.get(this.content);
+      if (cached !== undefined) {
+        container.innerHTML = cached;
+        return;
+      }
+      await renderMarkdown(this.content, container);
+      markdownRenderCache.set(this.content, container.innerHTML);
+    },
   },
 };
 
@@ -2355,7 +2371,7 @@ const app = createApp({
         </nav>
 
         <template v-for="x in mdExtras" :key="x.id">
-          <div v-show="activeMdKey === x.id" class="md-viewer">
+          <div v-if="activeMdKey === x.id" class="md-viewer">
             <div v-if="x.note" class="md-note">{{ x.note }}</div>
             <markdown-renderer :content="x.extra_value"></markdown-renderer>
           </div>
