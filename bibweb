@@ -4,6 +4,11 @@ bibweb — Web UI for bibdb
 
 Usage:
   bibweb [--port PORT] [--update] [DB_PATH]
+  bibweb --list
+  bibweb --stop [all] [--port PORT]
+
+1 つのポートには bibweb を 1 つだけ動かす。起動したポートに bibweb が既にいれば、
+それを止めてから起動し直す（DB が同じかどうかは問わない）。
 """
 
 import argparse
@@ -13,12 +18,18 @@ import json
 import mimetypes
 import os
 import re
+import signal
+import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
+import time
+import uuid
 import webbrowser
 import urllib.request
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -32,6 +43,12 @@ except ImportError:
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_PORT = 8766
+
+# 起動ごとに変わる ID。全レスポンスの X-Bibweb-Instance ヘッダーに載せ、
+# 再起動前のサーバーを見ていたタブがそれに気づけるようにする（app.js の apiFetch）
+INSTANCE_ID = uuid.uuid4().hex
+INSTANCE_HEADER = "X-Bibweb-Instance"
+STARTED_AT = datetime.now().isoformat(timespec="seconds")
 CACHE_DIR = Path.home() / ".cache" / "bibweb"
 
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/ugohsu/bibweb/main/web"
@@ -674,6 +691,21 @@ class BibWebHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # suppress access log
 
+    def end_headers(self):
+        self.send_header(INSTANCE_HEADER, INSTANCE_ID)
+        super().end_headers()
+
+    def reject_other_instance(self):
+        """リクエストが別の（再起動前の）インスタンス宛てなら 409 を返して True。
+        DB を替えて再起動したあと、古いタブの書き込みが新しい DB に入るのを防ぐ。
+        ヘッダーのないリクエスト（curl やページ本体の取得など）は通す。"""
+        sent = self.headers.get(INSTANCE_HEADER)
+        if sent and sent != INSTANCE_ID:
+            self.send_json({"error": "bibweb が再起動されました。ページを再読み込みしてください。",
+                            "restarted": True}, 409)
+            return True
+        return False
+
     def send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False, default=str).encode()
         self.send_response(status)
@@ -706,6 +738,8 @@ class BibWebHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if self.reject_other_instance():
+            return
         path = urlparse(self.path).path.rstrip("/") or "/"
 
         if path in ("/", "/index.html"):
@@ -720,6 +754,16 @@ class BibWebHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/db":
             self.send_json({"path": self.db_path})
+
+        # bibweb --list / --stop / 起動時の確認用
+        elif path == "/api/whoami":
+            self.send_json({
+                "app": "bibweb",
+                "pid": os.getpid(),
+                "db": self.db_path,
+                "started": STARTED_AT,
+                "instance": INSTANCE_ID,
+            })
 
         elif path == "/api/tags":
             self.send_json(list_tags(self.db_path))
@@ -799,6 +843,8 @@ class BibWebHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "Not found")
 
     def do_POST(self):
+        if self.reject_other_instance():
+            return
         path = urlparse(self.path).path
         parts = path.split("/")
 
@@ -915,6 +961,8 @@ class BibWebHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "Not found")
 
     def do_PUT(self):
+        if self.reject_other_instance():
+            return
         path = urlparse(self.path).path
         parts = path.split("/")
 
@@ -959,6 +1007,8 @@ class BibWebHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "Not found")
 
     def do_DELETE(self):
+        if self.reject_other_instance():
+            return
         path = urlparse(self.path).path
         parts = path.split("/")
 
@@ -999,6 +1049,92 @@ class BibWebHandler(BaseHTTPRequestHandler):
         else:
             self.send_error_json(404, "Not found")
 
+# ─── Instance management ──────────────────────────────────────────────────────
+# ポートを使っている bibweb は ss -ltnp で探す（Linux 専用）。プロセスのコマンドラインで
+# bibweb かどうかを確かめるので、/api/whoami を持たない古い bibweb も止められる。
+
+def _is_bibweb_pid(pid):
+    try:
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return any(Path(a.decode(errors="replace")).name == "bibweb" for a in args[:3])
+
+
+def find_instances():
+    """LISTEN 中の bibweb を [{port, pid}] で返す（ポート順）。"""
+    try:
+        out = subprocess.run(["ss", "-ltnpH"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"Error: ss を実行できません ({e})", file=sys.stderr)
+        sys.exit(1)
+    found = {}
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) < 4:
+            continue
+        port = cols[3].rsplit(":", 1)[-1]
+        if not port.isdigit():
+            continue
+        for pid in re.findall(r"pid=(\d+)", line):
+            if _is_bibweb_pid(pid):
+                found[int(port)] = int(pid)
+    return [{"port": port, "pid": pid} for port, pid in sorted(found.items())]
+
+
+def whoami(port):
+    """port の bibweb に /api/whoami を問い合わせる。答えなければ None（古い bibweb など）。"""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/whoami", timeout=2) as r:
+            info = json.loads(r.read())
+        return info if info.get("app") == "bibweb" else None
+    except Exception:
+        return None
+
+
+def port_in_use(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def stop_instance(inst):
+    """bibweb を SIGTERM で止め、ポートが空くまで待つ（最大 5 秒、だめなら SIGKILL）。"""
+    pid, port = inst["pid"], inst["port"]
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            if not port_in_use(port):
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.3)
+    except ProcessLookupError:
+        pass
+    print(f"Stopped bibweb on port {port} (pid {pid})")
+
+
+def list_instances():
+    insts = find_instances()
+    if not insts:
+        print("bibweb は動いていません。")
+        return
+    print(f"{'PORT':<6}{'PID':<8}{'STARTED':<21}DB")
+    for inst in insts:
+        info = whoami(inst["port"]) or {}
+        started = info.get("started", "?").replace("T", " ")
+        db = info.get("db", "?（古い bibweb）")
+        print(f"{inst['port']:<6}{inst['pid']:<8}{started:<21}{db}")
+
+
+def stop_port(port):
+    """port の bibweb を止める。止めたら True、bibweb がいなければ False。"""
+    insts = [i for i in find_instances() if i["port"] == port]
+    for inst in insts:
+        stop_instance(inst)
+    return bool(insts)
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1006,7 +1142,28 @@ def main():
     parser.add_argument("db", nargs="?", help="Path to the bibdb SQLite file")
     parser.add_argument("--port", "-p", type=int, default=DEFAULT_PORT, metavar="PORT")
     parser.add_argument("--update", action="store_true", help="Re-download all cached files and exit")
+    parser.add_argument("--list", "-l", action="store_true", help="List running bibweb instances")
+    parser.add_argument("--stop", nargs="?", const="port", metavar="all",
+                        help="Stop bibweb on PORT (default %d), or all instances with 'all'" % DEFAULT_PORT)
     args = parser.parse_args()
+    if args.stop not in (None, "port", "all"):
+        parser.error(f"--stop に指定できるのは all だけです: {args.stop}")
+
+    if args.list:
+        list_instances()
+        return
+
+    if args.stop == "all":
+        insts = find_instances()
+        if not insts:
+            print("bibweb は動いていません。")
+        for inst in insts:
+            stop_instance(inst)
+        return
+    if args.stop:
+        if not stop_port(args.port):
+            print(f"port {args.port} に bibweb は動いていません。")
+        return
 
     if args.update:
         print("Updating cache...")
@@ -1032,10 +1189,17 @@ def main():
 
     BibWebHandler.db_path = db_path
 
+    # 1 ポート 1 bibweb: 既にいればそれを止めて起動し直す。bibweb 以外がいれば終わる
+    if not stop_port(args.port) and port_in_use(args.port):
+        print(f"Error: port {args.port} は bibweb 以外のプログラムが使っています。"
+              "--port で別のポートを指定してください。", file=sys.stderr)
+        sys.exit(1)
+
     url = f"http://localhost:{args.port}"
     print(f"bibweb  {url}")
     print(f"DB      {db_path}")
-    print("Press Ctrl+C to stop.")
+    stop_hint = "bibweb --stop" + ("" if args.port == DEFAULT_PORT else f" --port {args.port}")
+    print(f"Press Ctrl+C (or run `{stop_hint}`) to stop.")
 
     server = HTTPServer(("localhost", args.port), BibWebHandler)
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()

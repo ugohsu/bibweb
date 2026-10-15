@@ -59,6 +59,46 @@ body {
 }
 .btn-add-entry:hover { background: rgba(255,255,255,0.25); }
 
+/* bibweb 再起動の検知（app.js の apiFetch）: 操作をふさいで再読み込みを促す */
+.restarted-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.45);
+}
+
+.restarted-box {
+  max-width: 420px;
+  padding: 24px 28px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.restarted-sub {
+  margin: 8px 0 16px;
+  font-size: 13px;
+  font-weight: 400;
+  color: #555;
+  line-height: 1.6;
+}
+
+.btn-restarted-reload {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 5px;
+  background: #1565c0;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-restarted-reload:hover { background: #0d47a1; }
+
 .header-db {
   font-size: 12px;
   opacity: 0.8;

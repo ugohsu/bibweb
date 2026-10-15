@@ -152,21 +152,48 @@ const MarkdownRenderer = {
 
 // ─── API ─────────────────────────────────────────────────────────────────────
 
+// bibweb は起動ごとに instance ID を変え、全レスポンスの X-Bibweb-Instance ヘッダーに載せる。
+// 最初に受け取った ID を以後のリクエストに付けて送り、違う ID が返ってきたら（= サーバーが
+// 再起動され、別の DB を開いているかもしれない）再読み込みを促す画面を出す。
+// 古い ID の付いたリクエストはサーバー側が 409 で拒むので、書き込みが別の DB に入ることはない。
+let serverInstance = null;
+const serverRestarted = ref(false);
+const reloadPage = () => location.reload();
+
+async function apiFetch(url, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  if (serverInstance) headers.set('X-Bibweb-Instance', serverInstance);
+  const r = await fetch(url, { ...opts, headers });
+  const id = r.headers.get('X-Bibweb-Instance');
+  if (id) {
+    if (!serverInstance) serverInstance = id;
+    else if (id !== serverInstance) serverRestarted.value = true;
+  }
+  return r;
+}
+
+// タブに戻ってきたときにも確かめる（操作する前に気づけるように）
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && serverInstance && !serverRestarted.value) {
+    apiFetch('/api/whoami').catch(() => {});
+  }
+});
+
 const api = {
   async getEntries() {
-    return (await fetch('/api/entries')).json();
+    return (await apiFetch('/api/entries')).json();
   },
   async getEntry(key) {
-    return (await fetch(`/api/entries/${encodeURIComponent(key)}`)).json();
+    return (await apiFetch(`/api/entries/${encodeURIComponent(key)}`)).json();
   },
   async getEntrySummary(key) {
-    return (await fetch(`/api/entries/${encodeURIComponent(key)}/summary`)).json();
+    return (await apiFetch(`/api/entries/${encodeURIComponent(key)}/summary`)).json();
   },
   async getDb() {
-    return (await fetch('/api/db')).json();
+    return (await apiFetch('/api/db')).json();
   },
   async exportBib(keys) {
-    const r = await fetch('/api/export', {
+    const r = await apiFetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys }),
@@ -174,7 +201,7 @@ const api = {
     return r.text();
   },
   async exportDb(keys) {
-    const r = await fetch('/api/export/db', {
+    const r = await apiFetch('/api/export/db', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys }),
@@ -182,19 +209,19 @@ const api = {
     return r.blob();
   },
   async updateField(citeKey, fieldKey, value) {
-    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/fields/${encodeURIComponent(fieldKey)}`, {
+    return apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/fields/${encodeURIComponent(fieldKey)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ field_value: value }),
     });
   },
   async deleteField(citeKey, fieldKey) {
-    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/fields/${encodeURIComponent(fieldKey)}`, {
+    return apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/fields/${encodeURIComponent(fieldKey)}`, {
       method: 'DELETE',
     });
   },
   async addField(citeKey, fieldKey, value) {
-    const r = await fetch(`/api/entries/${encodeURIComponent(citeKey)}/fields`, {
+    const r = await apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/fields`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ field_key: fieldKey, field_value: value }),
@@ -202,42 +229,42 @@ const api = {
     return r.json();
   },
   async updateExtra(id, value, note = null) {
-    return fetch(`/api/extras/${id}`, {
+    return apiFetch(`/api/extras/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ extra_value: value, note }),
     });
   },
   async deleteExtra(id) {
-    return fetch(`/api/extras/${id}`, { method: 'DELETE' });
+    return apiFetch(`/api/extras/${id}`, { method: 'DELETE' });
   },
   async addExtra(citeKey, extraKey, value, note = null) {
-    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/extras`, {
+    return apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/extras`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ extra_key: extraKey, extra_value: value, note }),
     });
   },
   async getTags() {
-    return (await fetch('/api/tags')).json();
+    return (await apiFetch('/api/tags')).json();
   },
   async addTag(citeKey, name) {
-    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/tags`, {
+    return apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/tags`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     });
   },
   async deleteTag(citeKey, name) {
-    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/tags/${encodeURIComponent(name)}`, {
+    return apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/tags/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     });
   },
   async getFigures(citeKey) {
-    return (await fetch(`/api/entries/${encodeURIComponent(citeKey)}/figures`)).json();
+    return (await apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/figures`)).json();
   },
   async addFigure(citeKey, { label, memo, image_base64, image_mime }) {
-    const r = await fetch(`/api/entries/${encodeURIComponent(citeKey)}/figures`, {
+    const r = await apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/figures`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label, memo, image_base64, image_mime }),
@@ -245,31 +272,31 @@ const api = {
     return r.json();
   },
   async updateFigure(id, label, memo) {
-    return fetch(`/api/figures/${id}`, {
+    return apiFetch(`/api/figures/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label, memo }),
     });
   },
   async deleteFigure(id) {
-    return fetch(`/api/figures/${id}`, { method: 'DELETE' });
+    return apiFetch(`/api/figures/${id}`, { method: 'DELETE' });
   },
   async reorderFigures(citeKey, ids) {
-    return fetch(`/api/entries/${encodeURIComponent(citeKey)}/figures/order`, {
+    return apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/figures/order`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     });
   },
   async bulkAddTag(keys, name) {
-    return fetch('/api/tags/bulk', {
+    return apiFetch('/api/tags/bulk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys, name }),
     });
   },
   async createEntry(citeKey, entryType, fields) {
-    const r = await fetch('/api/entries', {
+    const r = await apiFetch('/api/entries', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cite_key: citeKey, entry_type: entryType, fields }),
@@ -1832,7 +1859,7 @@ const app = createApp({
     return {
       // state
       entries, selectedEntry, searchQuery, checkedKeys,
-      activeTab, activeMdKey, dbPath,
+      activeTab, activeMdKey, dbPath, serverRestarted, reloadPage,
       sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       showCheckedOnly,
@@ -1887,6 +1914,14 @@ const app = createApp({
     </div>
     <span class="header-db" :title="dbPath">{{ dbPath }}</span>
   </header>
+
+  <div v-if="serverRestarted" class="restarted-overlay">
+    <div class="restarted-box">
+      <p>bibweb が再起動されました。</p>
+      <p class="restarted-sub">このタブは再起動前のサーバーを見ています（開いている DB が変わっている可能性があります）。再読み込みしてください。</p>
+      <button class="btn-restarted-reload" @click="reloadPage">再読み込み</button>
+    </div>
+  </div>
 
   <div class="main">
 
