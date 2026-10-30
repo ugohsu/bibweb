@@ -99,6 +99,41 @@ body {
 }
 .btn-restarted-reload:hover { background: #0d47a1; }
 
+/* bibweb の一覧と停止（ヘッダーの「bibweb を止める」） */
+.instances-box { max-width: 760px; }
+
+.instances-table {
+  margin: 12px 0 16px;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-weight: 400;
+}
+.instances-table th,
+.instances-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #eee;
+  text-align: left;
+  white-space: nowrap;
+}
+.instances-db {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.instances-self { color: #1565c0; }
+.instances-error { color: #c62828; }
+
+.btn-instances-close {
+  padding: 6px 16px;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  background: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-instances-close:hover { background: #f5f5f5; }
+
 .header-db {
   font-size: 12px;
   opacity: 0.8;

@@ -68,6 +68,10 @@ MIME = {
     ".css":  "text/css; charset=utf-8",
 }
 
+# local_extras のファイルのうち、ダウンロードさせずにブラウザでそのまま読ませるもの
+# （.org は mimetypes が推せず、.md は text/markdown でダウンロードになりやすい）
+LOCAL_TEXT_SUFFIXES = {".md", ".org", ".txt", ".bib", ".tex"}
+
 # ─── DB helpers ───────────────────────────────────────────────────────────────
 
 def resolve_db(db_arg):
@@ -499,7 +503,9 @@ def get_figure_image(db_path, note_id):
 def get_local_file(db_path, cite_key, extra_key):
     """local_extras に登録された、DBファイルからの相対パスを解決してファイル内容を返す。
     local_extras はこのDBファイルのある場所に紐づくローカル限定データ（例: pdf_path）であり、
-    bibdb のコードからは一切参照されない（dedup/インポート/エクスポートの対象外）。"""
+    bibdb のコードからは一切参照されない（dedup/インポート/エクスポートの対象外）。
+    パスは DB のディレクトリの外（../）も指せる。読むパスは local_extras からしか来ず、
+    そこに書く API はないので、外からの要求で任意のファイルを読ませることはできない。"""
     with get_conn(db_path) as conn:
         row = conn.execute(
             "SELECT le.extra_value FROM local_extras le "
@@ -511,12 +517,12 @@ def get_local_file(db_path, cite_key, extra_key):
         return None
     base_dir = os.path.dirname(os.path.abspath(db_path))
     full_path = os.path.normpath(os.path.join(base_dir, row["extra_value"]))
-    # ディレクトリトラバーサル対策: base_dir の外に出るパスは拒否
-    if os.path.commonpath([base_dir, full_path]) != base_dir:
-        return None
     if not os.path.isfile(full_path):
         return None
-    mime, _ = mimetypes.guess_type(full_path)
+    if Path(full_path).suffix.lower() in LOCAL_TEXT_SUFFIXES:
+        mime = "text/plain; charset=utf-8"
+    else:
+        mime, _ = mimetypes.guess_type(full_path)
     with open(full_path, "rb") as f:
         content = f.read()
     return content, mime or "application/octet-stream", os.path.basename(full_path)
@@ -695,6 +701,29 @@ class BibWebHandler(BaseHTTPRequestHandler):
         self.send_header(INSTANCE_HEADER, INSTANCE_ID)
         super().end_headers()
 
+    def local_hosts(self):
+        port = self.server.server_address[1]
+        return {f"localhost:{port}", f"127.0.0.1:{port}"}
+
+    def reject_foreign(self, write=False):
+        """bibweb 自身の画面とこのマシンのコマンド以外からの要求なら 403 を返して True。
+        - Host: localhost・127.0.0.1 以外の名前で来た要求は断る（DNS リバインディングで
+          外のサイトが localhost の応答を読むのを防ぐ）。
+        - 書き込み（POST・PUT・DELETE）: ほかのサイトのページから送られた要求は断る
+          （ブラウザが付ける Origin・Sec-Fetch-Site で見分ける。curl など付けないものは通す）。"""
+        hosts = self.local_hosts()
+        if self.headers.get("Host", "") not in hosts:
+            self.send_error_json(403, "Forbidden host")
+            return True
+        if write:
+            origin = self.headers.get("Origin")
+            site = self.headers.get("Sec-Fetch-Site")
+            if (origin is not None and origin not in {f"http://{h}" for h in hosts}) or \
+               (site is not None and site not in ("same-origin", "none")):
+                self.send_error_json(403, "Forbidden origin")
+                return True
+        return False
+
     def reject_other_instance(self):
         """リクエストが別の（再起動前の）インスタンス宛てなら 409 を返して True。
         DB を替えて再起動したあと、古いタブの書き込みが新しい DB に入るのを防ぐ。
@@ -738,7 +767,7 @@ class BibWebHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.reject_other_instance():
+        if self.reject_foreign() or self.reject_other_instance():
             return
         path = urlparse(self.path).path.rstrip("/") or "/"
 
@@ -764,6 +793,26 @@ class BibWebHandler(BaseHTTPRequestHandler):
                 "started": STARTED_AT,
                 "instance": INSTANCE_ID,
             })
+
+        # 画面の「bibweb の一覧」用（bibweb --list と同じもの）
+        elif path == "/api/instances":
+            try:
+                insts = find_instances(exit_on_error=False)
+            except RuntimeError as e:
+                self.send_error_json(500, str(e))
+                return
+            own = self.server.server_address[1]
+            result = []
+            for inst in insts:
+                if inst["port"] == own:
+                    # 自分には問い合わせない（1 スレッドのサーバーなので待ちになる）
+                    info = {"db": self.db_path, "started": STARTED_AT}
+                else:
+                    info = whoami(inst["port"]) or {}
+                result.append({"port": inst["port"], "pid": inst["pid"],
+                               "db": info.get("db"), "started": info.get("started"),
+                               "self": inst["port"] == own})
+            self.send_json(result)
 
         elif path == "/api/tags":
             self.send_json(list_tags(self.db_path))
@@ -843,13 +892,36 @@ class BibWebHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "Not found")
 
     def do_POST(self):
-        if self.reject_other_instance():
+        if self.reject_foreign(write=True) or self.reject_other_instance():
             return
         path = urlparse(self.path).path
         parts = path.split("/")
 
+        # POST /api/instances/{port}/stop — bibweb --stop --port PORT と同じ
+        if len(parts) == 5 and parts[1] == "api" and parts[2] == "instances" and parts[4] == "stop":
+            if not parts[3].isdigit():
+                self.send_error_json(400, "Invalid port")
+                return
+            port = int(parts[3])
+            if port == self.server.server_address[1]:
+                # 応答を返してから自分を止める（shutdown は別スレッドから呼ぶ）
+                self.send_json({"ok": True, "self": True})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            try:
+                insts = [i for i in find_instances(exit_on_error=False) if i["port"] == port]
+            except RuntimeError as e:
+                self.send_error_json(500, str(e))
+                return
+            if not insts:
+                self.send_error_json(404, f"port {port} に bibweb は動いていません")
+                return
+            for inst in insts:
+                stop_instance(inst)
+            self.send_json({"ok": True, "self": False})
+
         # POST /api/tags/bulk
-        if path == "/api/tags/bulk":
+        elif path == "/api/tags/bulk":
             body = self.read_json_body()
             ok, err = bulk_add_tag(self.db_path, body.get("keys", []), body.get("name", ""))
             if ok:
@@ -961,7 +1033,7 @@ class BibWebHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "Not found")
 
     def do_PUT(self):
-        if self.reject_other_instance():
+        if self.reject_foreign(write=True) or self.reject_other_instance():
             return
         path = urlparse(self.path).path
         parts = path.split("/")
@@ -1007,7 +1079,7 @@ class BibWebHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "Not found")
 
     def do_DELETE(self):
-        if self.reject_other_instance():
+        if self.reject_foreign(write=True) or self.reject_other_instance():
             return
         path = urlparse(self.path).path
         parts = path.split("/")
@@ -1061,11 +1133,14 @@ def _is_bibweb_pid(pid):
     return any(Path(a.decode(errors="replace")).name == "bibweb" for a in args[:3])
 
 
-def find_instances():
-    """LISTEN 中の bibweb を [{port, pid}] で返す（ポート順）。"""
+def find_instances(exit_on_error=True):
+    """LISTEN 中の bibweb を [{port, pid}] で返す（ポート順）。
+    ss が使えないとき、exit_on_error なら終わり、そうでなければ RuntimeError（画面の API 用）。"""
     try:
         out = subprocess.run(["ss", "-ltnpH"], capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as e:
+        if not exit_on_error:
+            raise RuntimeError(f"ss を実行できません ({e})")
         print(f"Error: ss を実行できません ({e})", file=sys.stderr)
         sys.exit(1)
     found = {}
@@ -1206,8 +1281,10 @@ def main():
 
     try:
         server.serve_forever()
+        print("Stopped from the web UI.")
     except KeyboardInterrupt:
         print("\nStopped.")
+    server.server_close()
 
 
 if __name__ == "__main__":

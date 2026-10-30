@@ -1826,6 +1826,44 @@ const app = createApp({
       await selectEntry(citeKey);
     }
 
+    // ── bibweb の一覧と停止（bibweb --list / --stop と同じ） ──────────────────
+    const instancesOpen  = ref(false);
+    const instances      = ref([]);
+    const instancesError = ref('');
+    const serverStopped  = ref(false);
+
+    async function openInstances() {
+      instancesOpen.value = true;
+      instancesError.value = '';
+      instances.value = [];
+      try {
+        const r = await apiFetch('/api/instances');
+        const body = await r.json();
+        if (!r.ok) { instancesError.value = body.error || `HTTP ${r.status}`; return; }
+        instances.value = body;
+      } catch (e) {
+        instancesError.value = String(e);
+      }
+    }
+
+    async function stopInstance(inst) {
+      const label = inst.self ? 'このタブの bibweb' : `port ${inst.port} の bibweb`;
+      if (!confirm(`${label}を止めますか？`)) return;
+      try {
+        const r = await apiFetch(`/api/instances/${inst.port}/stop`, { method: 'POST' });
+        const body = await r.json();
+        if (!r.ok) { instancesError.value = body.error || `HTTP ${r.status}`; return; }
+        if (body.self) {
+          instancesOpen.value = false;
+          serverStopped.value = true;
+          return;
+        }
+        await openInstances();
+      } catch (e) {
+        instancesError.value = String(e);
+      }
+    }
+
     // ── Init ───────────────────────────────────────────────────────────────
     onMounted(async () => {
       const db = await api.getDb();
@@ -1860,6 +1898,7 @@ const app = createApp({
       // state
       entries, selectedEntry, searchQuery, checkedKeys,
       activeTab, activeMdKey, dbPath, serverRestarted, reloadPage,
+      instancesOpen, instances, instancesError, serverStopped, openInstances, stopInstance,
       sortMode,
       allTags, tagFilterOpen, selectedTags, newTagInput, bulkTagInput,
       showCheckedOnly,
@@ -1911,6 +1950,7 @@ const app = createApp({
       <button class="btn-add-entry" @click="openCustomViewPicker">📄 カスタムビューを開く</button>
       <input ref="customViewFileInputRef" type="file" accept=".html,.htm" style="display:none"
              @change="handleCustomViewFileInput">
+      <button class="btn-add-entry" @click="openInstances">⏻ bibweb を止める</button>
     </div>
     <span class="header-db" :title="dbPath">{{ dbPath }}</span>
   </header>
@@ -1920,6 +1960,32 @@ const app = createApp({
       <p>bibweb が再起動されました。</p>
       <p class="restarted-sub">このタブは再起動前のサーバーを見ています（開いている DB が変わっている可能性があります）。再読み込みしてください。</p>
       <button class="btn-restarted-reload" @click="reloadPage">再読み込み</button>
+    </div>
+  </div>
+
+  <!-- bibweb の一覧と停止（bibweb --list / --stop と同じ） -->
+  <div v-if="instancesOpen" class="restarted-overlay" @click.self="instancesOpen = false">
+    <div class="restarted-box instances-box">
+      <p>動いている bibweb</p>
+      <p v-if="instancesError" class="restarted-sub instances-error">{{ instancesError }}</p>
+      <table v-else-if="instances.length" class="instances-table">
+        <tr><th>PORT</th><th>起動</th><th>DB</th><th></th></tr>
+        <tr v-for="inst in instances" :key="inst.port">
+          <td>{{ inst.port }}<span v-if="inst.self" class="instances-self">（このタブ）</span></td>
+          <td>{{ (inst.started || '?').replace('T', ' ') }}</td>
+          <td class="instances-db" :title="inst.db">{{ inst.db || '?（古い bibweb）' }}</td>
+          <td><button class="btn-restarted-reload" @click="stopInstance(inst)">止める</button></td>
+        </tr>
+      </table>
+      <p v-else class="restarted-sub">読み込み中…</p>
+      <button class="btn-instances-close" @click="instancesOpen = false">閉じる</button>
+    </div>
+  </div>
+
+  <div v-if="serverStopped" class="restarted-overlay">
+    <div class="restarted-box">
+      <p>bibweb を止めました。</p>
+      <p class="restarted-sub">このタブは閉じてかまいません。また使うときは、端末から bibweb を起動してください。</p>
     </div>
   </div>
 
