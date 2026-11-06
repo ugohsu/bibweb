@@ -257,6 +257,14 @@ CREATE TABLE figure_notes (
     sort_order  INTEGER NOT NULL DEFAULT 0,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE figure_images (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    figure_id   INTEGER NOT NULL REFERENCES figure_notes(id) ON DELETE CASCADE,
+    image_data  BLOB    NOT NULL,
+    image_mime  TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 def ensure_figure_notes_table(db_path):
@@ -276,9 +284,37 @@ def ensure_figure_notes_table(db_path):
                 FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS figure_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                figure_id INTEGER NOT NULL,
+                image_data BLOB NOT NULL,
+                image_mime TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(figure_id) REFERENCES figure_notes(id) ON DELETE CASCADE
+            )
+        """)
+        migrate_legacy_figure_images(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def migrate_legacy_figure_images(conn):
+    """【後方互換】画像を figure_images に分ける前の DB では、画像が figure_notes.image_data に
+    1 枚だけ入っている。それを figure_images の 1 枚目に移し、元の列は NULL にする（何度呼んでもよい）。
+    bibdb の init_db にも同じ処理がある。後方互換を切るときは、この関数と呼び出し、
+    figure_notes の image_data/image_mime 列（bibdb の init_db・_BIBDB_SCHEMA）を消す。"""
+    conn.execute(
+        "INSERT INTO figure_images (figure_id, image_data, image_mime, sort_order, created_at) "
+        "SELECT id, image_data, image_mime, 0, created_at FROM figure_notes "
+        "WHERE image_data IS NOT NULL"
+    )
+    conn.execute(
+        "UPDATE figure_notes SET image_data = NULL, image_mime = NULL "
+        "WHERE image_data IS NOT NULL"
+    )
 
 
 def ensure_local_extras_table(db_path):
@@ -341,17 +377,29 @@ def export_db(db_path, cite_keys):
                             (row["id"], x["extra_key"], x["extra_value"], x["note"])
                         )
                     for fn in src.execute(
-                        "SELECT label, memo, image_data, image_mime, sort_order, created_at "
+                        "SELECT id, label, memo, sort_order, created_at "
                         "FROM figure_notes WHERE entry_id = ? ORDER BY sort_order, id",
                         (row["id"],)
                     ).fetchall():
-                        dst.execute(
+                        cur = dst.execute(
                             "INSERT INTO figure_notes "
-                            "(entry_id, label, memo, image_data, image_mime, sort_order, created_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (row["id"], fn["label"], fn["memo"], fn["image_data"],
-                             fn["image_mime"], fn["sort_order"], fn["created_at"])
+                            "(entry_id, label, memo, sort_order, created_at) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (row["id"], fn["label"], fn["memo"],
+                             fn["sort_order"], fn["created_at"])
                         )
+                        for im in src.execute(
+                            "SELECT image_data, image_mime, sort_order, created_at "
+                            "FROM figure_images WHERE figure_id = ? ORDER BY sort_order, id",
+                            (fn["id"],)
+                        ).fetchall():
+                            dst.execute(
+                                "INSERT INTO figure_images "
+                                "(figure_id, image_data, image_mime, sort_order, created_at) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (cur.lastrowid, im["image_data"], im["image_mime"],
+                                 im["sort_order"], im["created_at"])
+                            )
         with open(tmp, "rb") as f:
             return f.read()
     finally:
@@ -482,18 +530,24 @@ def list_figure_notes(db_path, cite_key):
         if not entry:
             return None
         rows = conn.execute(
-            "SELECT id, label, memo, image_mime, sort_order, created_at, "
-            "(image_data IS NOT NULL) AS has_image "
+            "SELECT id, label, memo, sort_order, created_at "
             "FROM figure_notes WHERE entry_id = ? ORDER BY sort_order, id",
             (entry["id"],)
         ).fetchall()
-        return [dict(r) for r in rows]
+        notes = [dict(r) for r in rows]
+        for n in notes:
+            n["images"] = [dict(r) for r in conn.execute(
+                "SELECT id, image_mime FROM figure_images "
+                "WHERE figure_id = ? ORDER BY sort_order, id",
+                (n["id"],)
+            ).fetchall()]
+        return notes
 
 
-def get_figure_image(db_path, note_id):
+def get_figure_image(db_path, image_id):
     with get_conn(db_path) as conn:
         row = conn.execute(
-            "SELECT image_data, image_mime FROM figure_notes WHERE id = ?", (note_id,)
+            "SELECT image_data, image_mime FROM figure_images WHERE id = ?", (image_id,)
         ).fetchone()
         if not row or row["image_data"] is None:
             return None, None
@@ -540,11 +594,40 @@ def add_figure_note(db_path, cite_key, label, memo, image_bytes, image_mime):
         ).fetchone()[0]
         next_order = (max_order + 1) if max_order is not None else 0
         cur = conn.execute(
-            "INSERT INTO figure_notes (entry_id, label, memo, image_data, image_mime, sort_order) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (entry["id"], label, memo, image_bytes, image_mime, next_order)
+            "INSERT INTO figure_notes (entry_id, label, memo, sort_order) "
+            "VALUES (?, ?, ?, ?)",
+            (entry["id"], label, memo, next_order)
+        )
+        note_id = cur.lastrowid
+        if image_bytes:
+            conn.execute(
+                "INSERT INTO figure_images (figure_id, image_data, image_mime, sort_order) "
+                "VALUES (?, ?, ?, 0)",
+                (note_id, image_bytes, image_mime)
+            )
+        return True, note_id
+
+
+def add_figure_image(db_path, note_id, image_bytes, image_mime):
+    with get_conn(db_path) as conn:
+        if not conn.execute("SELECT 1 FROM figure_notes WHERE id = ?", (note_id,)).fetchone():
+            return False, None
+        max_order = conn.execute(
+            "SELECT MAX(sort_order) FROM figure_images WHERE figure_id = ?", (note_id,)
+        ).fetchone()[0]
+        next_order = (max_order + 1) if max_order is not None else 0
+        cur = conn.execute(
+            "INSERT INTO figure_images (figure_id, image_data, image_mime, sort_order) "
+            "VALUES (?, ?, ?, ?)",
+            (note_id, image_bytes, image_mime, next_order)
         )
         return True, cur.lastrowid
+
+
+def delete_figure_image(db_path, image_id):
+    with get_conn(db_path) as conn:
+        conn.execute("DELETE FROM figure_images WHERE id = ?", (image_id,))
+        return True
 
 
 def update_figure_note(db_path, note_id, label, memo):
@@ -558,6 +641,8 @@ def update_figure_note(db_path, note_id, label, memo):
 
 def delete_figure_note(db_path, note_id):
     with get_conn(db_path) as conn:
+        # get_conn は foreign_keys を有効にしないので、画像は明示的に消す
+        conn.execute("DELETE FROM figure_images WHERE figure_id = ?", (note_id,))
         conn.execute("DELETE FROM figure_notes WHERE id = ?", (note_id,))
         return True
 
@@ -752,6 +837,18 @@ class BibWebHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length))
 
+    def decode_image(self, body):
+        """body の image_base64 を画像のバイト列にする。画像はリサイズせず、
+        PNG パレット削減のみ行う（_quantize_image 参照）。失敗したら 400 を返して (None, None)。"""
+        try:
+            image_bytes = base64.b64decode(body.get("image_base64") or "")
+        except Exception:
+            self.send_error_json(400, "image_base64 のデコードに失敗しました")
+            return None, None
+        image_mime = body.get("image_mime") or "application/octet-stream"
+        image_bytes, quantized_mime = _quantize_image(image_bytes)
+        return image_bytes, quantized_mime or image_mime
+
     def serve_cached(self, fname):
         path = CACHE_DIR / fname
         if not path.exists():
@@ -865,16 +962,16 @@ class BibWebHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error_json(404, "Not found")
 
-        # GET /api/figures/{id}/image
-        elif path.startswith("/api/figures/"):
+        # GET /api/figure-images/{id}
+        elif path.startswith("/api/figure-images/"):
             parts = path.split("/")
-            if len(parts) == 5 and parts[4] == "image":
+            if len(parts) == 4:
                 try:
-                    note_id = int(parts[3])
+                    image_id = int(parts[3])
                 except ValueError:
                     self.send_error_json(400, "Invalid id")
                     return
-                image_data, image_mime = get_figure_image(self.db_path, note_id)
+                image_data, image_mime = get_figure_image(self.db_path, image_id)
                 if image_data is None:
                     self.send_response(404)
                     self.end_headers()
@@ -1001,24 +1098,15 @@ class BibWebHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error_json(409, err)
 
-        # POST /api/entries/{key}/figures — add a figure/table note
-        # 画像はリサイズせず、PNG パレット削減のみ行って保存する（_quantize_image 参照）。
-        elif len(parts) == 5 and parts[4] == "figures":
+        # POST /api/entries/{key}/figures — add a figure/table note（画像は任意）
+        elif len(parts) == 5 and parts[2] == "entries" and parts[4] == "figures":
             cite_key = unquote(parts[3])
             body = self.read_json_body()
-            image_b64 = body.get("image_base64") or ""
-            if not image_b64:
-                self.send_error_json(400, "image_base64 が空です")
-                return
-            try:
-                image_bytes = base64.b64decode(image_b64)
-            except Exception:
-                self.send_error_json(400, "image_base64 のデコードに失敗しました")
-                return
-            image_mime = body.get("image_mime") or "application/octet-stream"
-            image_bytes, quantized_mime = _quantize_image(image_bytes)
-            if quantized_mime:
-                image_mime = quantized_mime
+            image_bytes, image_mime = None, None
+            if body.get("image_base64"):
+                image_bytes, image_mime = self.decode_image(body)
+                if image_bytes is None:
+                    return
             ok, note_id = add_figure_note(
                 self.db_path, cite_key,
                 body.get("label") or "", body.get("memo") or "",
@@ -1028,6 +1116,26 @@ class BibWebHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "id": note_id}, status=201)
             else:
                 self.send_error_json(404, "Entry not found")
+
+        # POST /api/figures/{id}/images — add an image to a figure/table note
+        elif len(parts) == 5 and parts[2] == "figures" and parts[4] == "images":
+            try:
+                note_id = int(parts[3])
+            except ValueError:
+                self.send_error_json(400, "Invalid id")
+                return
+            body = self.read_json_body()
+            if not body.get("image_base64"):
+                self.send_error_json(400, "image_base64 が空です")
+                return
+            image_bytes, image_mime = self.decode_image(body)
+            if image_bytes is None:
+                return
+            ok, image_id = add_figure_image(self.db_path, note_id, image_bytes, image_mime)
+            if ok:
+                self.send_json({"ok": True, "id": image_id}, status=201)
+            else:
+                self.send_error_json(404, "Figure not found")
 
         else:
             self.send_error_json(404, "Not found")
@@ -1116,6 +1224,16 @@ class BibWebHandler(BaseHTTPRequestHandler):
                 self.send_error_json(400, "Invalid id")
                 return
             ok = delete_figure_note(self.db_path, note_id)
+            self.send_json({"ok": ok})
+
+        # DELETE /api/figure-images/{id}
+        elif len(parts) == 4 and parts[2] == "figure-images":
+            try:
+                image_id = int(parts[3])
+            except ValueError:
+                self.send_error_json(400, "Invalid id")
+                return
+            ok = delete_figure_image(self.db_path, image_id)
             self.send_json({"ok": ok})
 
         else:

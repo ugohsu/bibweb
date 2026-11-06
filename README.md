@@ -195,24 +195,29 @@ claude -p "..." | bibdb set-extra Knuth1984 md.digest --replace
 
 実証研究では表・図・数式の読解が本文の要約以上に重要になることが多いため、Info タブと Markdown タブの間に「Exhibits」タブを設け、論文中の図表を画像として直接貼り付けてメモを残せるようにしています。
 
-- **貼り付け方法**: Exhibits タブ内をクリックしてフォーカスした状態で画像をペースト（Ctrl+V / Cmd+V）するか、画像ファイルをドラッグ&ドロップ、または「ファイルを選択」ボタンから選択します。
+- **貼り付け方法**: Exhibits タブ内をクリックしてフォーカスした状態で画像をペースト（Ctrl+V / Cmd+V）するか、画像ファイルをドラッグ&ドロップ、または「ファイルを選択」ボタンから選択します。新しい図表メモになります。
+- **1 つの図表メモに画像を何枚か付ける**: カードをクリックして選んだ状態でペースト・ドロップするか、カードの「+ 画像」から選ぶと、その図表メモに画像を足します（表の本体と、関連する式のスクリーンショットなど）。画像ごとに右上の ✕ で消せます。
+- **画像なしの図表メモ**: 「+ テキストで追加」で、画像のない図表メモを作れます（表の読みや回帰式だけを先に書く）。
 - **保存時の圧縮（PNG パレット削減・リサイズなし）**: 解像度は変えず、Pillow で PNG のパレット（色数）を削減してから SQLite の BLOB として保存します。文字・罫線中心の論文の図表スクリーンショットは実質的に使っている色数が少ないため、見た目の劣化はほぼ生じません（実測例: 780×761 の表画像で 140KB → 43KB、目視でも劣化を確認できませんでした）。カラー写真やグラデーションを含む図はこの限りではありません。削減後のほうが大きくなる場合や Pillow が無い環境では、元のバイト列をそのまま保存します。枚数が多くなると DB ファイルは大きくなっていくので、その点は変わらず注意してください。
-- **キャプション・メモ**: 各画像に「ラベル」（例: `Fig. 3`, `Table 2`）と自由記述の「メモ」を付けられます。あとから編集できます。
+- **キャプション・メモ**: 各図表メモに「ラベル」（例: `Fig. 3`, `Table 2`）と自由記述の「メモ」を付けられます。あとから編集できます。メモは Markdown タブと同じく Markdown と KaTeX（`$...$`・`$$...$$`）で表示します。
 - **表示順の変更**: カードの ↑ / ↓ ボタンで並び順を後から入れ替えられます。
 - **拡大表示**: サムネイルをクリックすると原寸に近いサイズでライトボックス表示します。
-- 保存先は `extras` とは別の専用テーブル `figure_notes` です（`extras` は値が TEXT のみの key-value テーブルで、画像バイナリや表示順を自然に表現できないため）。
+- 保存先は `extras` とは別の専用テーブル `figure_notes`（ラベル・メモ・表示順）と `figure_images`（画像。1 つの図表メモに 0 枚以上）です（`extras` は値が TEXT のみの key-value テーブルで、画像バイナリや表示順を自然に表現できないため）。
+- **旧形式からの移行（後方互換）**: `figure_images` より前の DB では画像が `figure_notes.image_data` に 1 枚だけ入っていました。bibweb は起動時にそれを `figure_images` へ移し、元の列を NULL にします（何度起動してもよい。bibdb の `init_db` も同じことをする）。後方互換を切るときは `migrate_legacy_figure_images` と旧列を消します。
 - `.db` エクスポート/インポート、`bibdb dedup` によるエントリ統合でも、`extras` と同じ lossless 方針で図表メモが引き継がれます（bibdb 側の対応が必要なため、bibdb 本体にも `figure_notes` を認識させています。詳細は冒頭の説明と [bibdb の README](https://github.com/ugohsu/bibdb) を参照してください）。
 
 ### API（参考）
 
 | Method | Path | 用途 |
 |---|---|---|
-| GET | `/api/entries/{cite_key}/figures` | 図表メモ一覧（画像本体は含まない） |
-| GET | `/api/figures/{id}/image` | 画像本体の取得 |
-| POST | `/api/entries/{cite_key}/figures` | 追加（`image_base64` で画像を送信） |
+| GET | `/api/entries/{cite_key}/figures` | 図表メモ一覧（画像本体は含まず、各メモの `images` に画像の ID と MIME） |
+| GET | `/api/figure-images/{image_id}` | 画像本体の取得 |
+| POST | `/api/entries/{cite_key}/figures` | 追加（`image_base64` は任意。なければ画像なしの図表メモ） |
+| POST | `/api/figures/{id}/images` | 図表メモに画像を足す（`image_base64`） |
+| DELETE | `/api/figure-images/{image_id}` | 画像を 1 枚削除 |
 | PUT | `/api/figures/{id}` | ラベル・メモの更新 |
 | PUT | `/api/entries/{cite_key}/figures/order` | 表示順の一括更新（`ids` に並び替え後の ID 配列） |
-| DELETE | `/api/figures/{id}` | 削除 |
+| DELETE | `/api/figures/{id}` | 図表メモの削除（画像ごと） |
 
 ---
 

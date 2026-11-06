@@ -281,6 +281,17 @@ const api = {
   async deleteFigure(id) {
     return apiFetch(`/api/figures/${id}`, { method: 'DELETE' });
   },
+  async addFigureImage(id, { image_base64, image_mime }) {
+    const r = await apiFetch(`/api/figures/${id}/images`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64, image_mime }),
+    });
+    return r.json();
+  },
+  async deleteFigureImage(imageId) {
+    return apiFetch(`/api/figure-images/${imageId}`, { method: 'DELETE' });
+  },
   async reorderFigures(citeKey, ids) {
     return apiFetch(`/api/entries/${encodeURIComponent(citeKey)}/figures/order`, {
       method: 'PUT',
@@ -1587,8 +1598,9 @@ const app = createApp({
     }
 
     // ── Methods: 図表メモ (Figures タブ) ───────────────────────────────────
-    function figureImageUrl(id) {
-      return `/api/figures/${id}/image`;
+    // 画像は figure_images の行ごと（1 つの図表メモに 0 枚以上）。id は画像の id
+    function figureImageUrl(imageId) {
+      return `/api/figure-images/${imageId}`;
     }
 
     async function loadFigures() {
@@ -1606,43 +1618,71 @@ const app = createApp({
       });
     }
 
-    async function uploadFigureBlob(blob) {
+    // fig を渡すとその図表メモに画像を足し、渡さなければ新しい図表メモを作る
+    async function uploadFigureBlob(blob, fig = null) {
       if (!selectedEntry.value || !blob) return;
       figureBusy.value = true;
       try {
         const image_base64 = await blobToBase64(blob);
-        await api.addFigure(selectedEntry.value.cite_key, {
-          label: '', memo: '',
-          image_base64,
-          image_mime: blob.type || 'application/octet-stream',
-        });
+        const image_mime = blob.type || 'application/octet-stream';
+        if (fig) {
+          await api.addFigureImage(fig.id, { image_base64, image_mime });
+        } else {
+          await api.addFigure(selectedEntry.value.cite_key, {
+            label: '', memo: '', image_base64, image_mime,
+          });
+        }
         await loadFigures();
       } finally {
         figureBusy.value = false;
       }
     }
 
-    function handleFigurePaste(event) {
-      const items = event.clipboardData?.items;
-      if (!items) return;
-      for (const item of items) {
-        if (item.type && item.type.startsWith('image/')) {
-          event.preventDefault();
-          uploadFigureBlob(item.getAsFile());
-          return;
-        }
+    function pastedImage(event) {
+      for (const item of event.clipboardData?.items ?? []) {
+        if (item.type && item.type.startsWith('image/')) return item.getAsFile();
       }
+      return null;
     }
 
-    function handleFigureDrop(event) {
+    function droppedImage(event) {
       const file = event.dataTransfer?.files?.[0];
-      if (file && file.type.startsWith('image/')) uploadFigureBlob(file);
+      return file && file.type.startsWith('image/') ? file : null;
     }
 
-    function handleFigureFileInput(event) {
+    // パネル全体: 新しい図表メモ。カードの上: そのメモに画像を足す（カード側で伝播を止める）
+    function handleFigurePaste(event, fig = null) {
+      const file = pastedImage(event);
+      if (!file) return;
+      event.preventDefault();
+      uploadFigureBlob(file, fig);
+    }
+
+    function handleFigureDrop(event, fig = null) {
+      const file = droppedImage(event);
+      if (file) uploadFigureBlob(file, fig);
+    }
+
+    function handleFigureFileInput(event, fig = null) {
       const file = event.target.files?.[0];
-      if (file) uploadFigureBlob(file);
+      if (file) uploadFigureBlob(file, fig);
       event.target.value = '';
+    }
+
+    // 画像なしの図表メモ（表の読み・回帰式だけ）を作って、そのまま編集を始める
+    async function addTextFigure() {
+      if (!selectedEntry.value) return;
+      const r = await api.addFigure(selectedEntry.value.cite_key, { label: '', memo: '' });
+      await loadFigures();
+      const fig = figures.value.find(f => f.id === r.id);
+      if (fig) startEditFigure(fig);
+    }
+
+    async function deleteFigureImage(imageId) {
+      if (!confirm('この画像を削除しますか？')) return;
+      await api.deleteFigureImage(imageId);
+      if (lightboxFigureId.value === imageId) lightboxFigureId.value = null;
+      await loadFigures();
     }
 
     function startEditFigure(fig) {
@@ -1666,7 +1706,7 @@ const app = createApp({
     async function deleteFigureNote(id) {
       if (!confirm('この図表メモを削除しますか？')) return;
       await api.deleteFigure(id);
-      if (lightboxFigureId.value === id) lightboxFigureId.value = null;
+      lightboxFigureId.value = null;
       await loadFigures();
     }
 
@@ -1930,7 +1970,7 @@ const app = createApp({
       regenAddCitekey, removeAddField, addAddField, submitAddEntry,
       openCustomViewPicker, handleCustomViewFileInput,
       figureImageUrl, handleFigurePaste, handleFigureDrop, handleFigureFileInput,
-      startEditFigure, cancelFigureEdit, saveFigureEdit, deleteFigureNote, moveFigure,
+      addTextFigure, deleteFigureImage, startEditFigure, cancelFigureEdit, saveFigureEdit, deleteFigureNote, moveFigure,
       openFigureLightbox, closeFigureLightbox,
       // helpers exposed to template
       mdKeyLabel, fileLabel, localFileLabel, localFileUrl, firstAuthor, MD_KEY_LABELS,
@@ -2365,25 +2405,34 @@ const app = createApp({
            @paste="handleFigurePaste" @dragover.prevent @drop.prevent="handleFigureDrop">
 
         <div class="figure-paste-zone">
-          <span>画像をペースト (Ctrl+V) またはドラッグ&ドロップ</span>
+          <span>画像をペースト (Ctrl+V) またはドラッグ&ドロップで新しい図表メモ。
+                カードを選んでペースト・ドロップすると、そのメモに画像を足す</span>
           <label class="btn btn-add figure-file-label">
             ファイルを選択
             <input type="file" accept="image/*" class="figure-file-input"
-                   @change="handleFigureFileInput">
+                   @change="handleFigureFileInput($event)">
           </label>
+          <button class="btn btn-add" @click="addTextFigure">+ テキストで追加</button>
           <span v-if="figureBusy" class="figure-uploading">アップロード中…</span>
         </div>
 
         <div class="figure-list" v-if="figures.length > 0">
-          <div class="figure-card" v-for="(fig, idx) in figures" :key="fig.id">
-            <img :src="figureImageUrl(fig.id)" class="figure-thumb"
-                 @click="openFigureLightbox(fig.id)" alt="">
+          <div class="figure-card" v-for="(fig, idx) in figures" :key="fig.id"
+               tabindex="0"
+               @paste.stop="handleFigurePaste($event, fig)"
+               @dragover.prevent @drop.stop.prevent="handleFigureDrop($event, fig)">
+            <div class="figure-image" v-for="img in fig.images" :key="img.id">
+              <img :src="figureImageUrl(img.id)" class="figure-thumb"
+                   @click="openFigureLightbox(img.id)" alt="">
+              <button class="icon-btn figure-image-remove" title="この画像を削除"
+                      @click="deleteFigureImage(img.id)">✕</button>
+            </div>
             <div class="figure-body">
               <template v-if="editingFigureId === fig.id">
                 <input v-model="editingFigureLabel" class="add-key-input"
                        placeholder="ラベル 例: Fig. 3 / Table 2">
-                <textarea v-model="editingFigureMemo" class="edit-textarea" rows="3"
-                          placeholder="メモ"
+                <textarea v-model="editingFigureMemo" class="edit-textarea" rows="8"
+                          placeholder="メモ (Markdown。数式は $...$ / $$...$$)"
                           @keydown.ctrl.enter="saveFigureEdit" @keydown.meta.enter="saveFigureEdit"></textarea>
                 <div class="edit-actions">
                   <button @click="saveFigureEdit" class="btn btn-save">保存</button>
@@ -2392,7 +2441,8 @@ const app = createApp({
               </template>
               <template v-else>
                 <div class="figure-label">{{ fig.label || '(ラベルなし)' }}</div>
-                <div class="figure-memo">{{ fig.memo }}</div>
+                <markdown-renderer v-if="fig.memo" class="figure-memo"
+                                   :content="fig.memo"></markdown-renderer>
               </template>
             </div>
             <div class="figure-actions" v-if="editingFigureId !== fig.id">
@@ -2402,10 +2452,15 @@ const app = createApp({
                       @click="moveFigure(idx, 1)">↓</button>
               <button class="icon-btn" title="編集" @click="startEditFigure(fig)">✏️</button>
               <button class="icon-btn" title="削除" @click="deleteFigureNote(fig.id)">🗑️</button>
+              <label class="btn btn-add figure-file-label figure-add-image" title="このメモに画像を足す">
+                + 画像
+                <input type="file" accept="image/*" class="figure-file-input"
+                       @change="handleFigureFileInput($event, fig)">
+              </label>
             </div>
           </div>
         </div>
-        <p v-else class="empty-hint">まだ図表メモがありません。上の枠に画像をペーストしてください。</p>
+        <p v-else class="empty-hint">まだ図表メモがありません。上の枠に画像をペーストするか、テキストで追加してください。</p>
       </div>
 
       <!-- ── Extras tab ── -->

@@ -1314,6 +1314,8 @@ body {
   position: relative;
   overflow: hidden;
 }
+.figure-paste-zone .btn-add,
+.figure-actions .btn-add { width: auto; margin-top: 0; }
 
 .figure-file-input {
   position: absolute;
@@ -1338,14 +1340,26 @@ body {
   overflow: hidden;
   background: #fff;
 }
+.figure-card:focus { outline: 2px solid #90caf9; outline-offset: -2px; }
+
+.figure-image { position: relative; background: #f5f5f5; }
+.figure-image + .figure-image { border-top: 1px solid #f0f0f0; }
+.figure-image-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(255,255,255,0.85);
+  opacity: 0;
+}
+.figure-image:hover .figure-image-remove { opacity: 1; }
 
 .figure-thumb {
-  width: 100%;
+  max-width: 100%;
   max-height: 640px;
   object-fit: contain;
-  background: #f5f5f5;
   cursor: zoom-in;
   display: block;
+  margin: 0 auto;
 }
 
 .figure-body {
@@ -1358,11 +1372,12 @@ body {
 .figure-label { font-weight: 600; font-size: 13px; color: #212121; }
 
 .figure-memo {
-  font-size: 12px;
-  color: #616161;
-  white-space: pre-wrap;
+  font-size: 13px;
+  color: #424242;
   word-break: break-word;
 }
+
+.figure-add-image { margin: 0 0 0 auto; padding: 2px 10px; font-size: 12px; }
 
 .figure-actions {
   display: flex;
