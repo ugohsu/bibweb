@@ -252,8 +252,6 @@ CREATE TABLE figure_notes (
     entry_id    INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     label       TEXT,
     memo        TEXT,
-    image_data  BLOB,
-    image_mime  TEXT,
     sort_order  INTEGER NOT NULL DEFAULT 0,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -277,8 +275,6 @@ def ensure_figure_notes_table(db_path):
                 entry_id INTEGER NOT NULL,
                 label TEXT,
                 memo TEXT,
-                image_data BLOB,
-                image_mime TEXT,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
@@ -295,26 +291,9 @@ def ensure_figure_notes_table(db_path):
                 FOREIGN KEY(figure_id) REFERENCES figure_notes(id) ON DELETE CASCADE
             )
         """)
-        migrate_legacy_figure_images(conn)
         conn.commit()
     finally:
         conn.close()
-
-
-def migrate_legacy_figure_images(conn):
-    """【後方互換】画像を figure_images に分ける前の DB では、画像が figure_notes.image_data に
-    1 枚だけ入っている。それを figure_images の 1 枚目に移し、元の列は NULL にする（何度呼んでもよい）。
-    bibdb の init_db にも同じ処理がある。後方互換を切るときは、この関数と呼び出し、
-    figure_notes の image_data/image_mime 列（bibdb の init_db・_BIBDB_SCHEMA）を消す。"""
-    conn.execute(
-        "INSERT INTO figure_images (figure_id, image_data, image_mime, sort_order, created_at) "
-        "SELECT id, image_data, image_mime, 0, created_at FROM figure_notes "
-        "WHERE image_data IS NOT NULL"
-    )
-    conn.execute(
-        "UPDATE figure_notes SET image_data = NULL, image_mime = NULL "
-        "WHERE image_data IS NOT NULL"
-    )
 
 
 def ensure_local_extras_table(db_path):

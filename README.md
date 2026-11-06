@@ -203,7 +203,6 @@ claude -p "..." | bibdb set-extra Knuth1984 md.digest --replace
 - **表示順の変更**: カードの ↑ / ↓ ボタンで並び順を後から入れ替えられます。
 - **拡大表示**: サムネイルをクリックすると原寸に近いサイズでライトボックス表示します。
 - 保存先は `extras` とは別の専用テーブル `figure_notes`（ラベル・メモ・表示順）と `figure_images`（画像。1 つの図表メモに 0 枚以上）です（`extras` は値が TEXT のみの key-value テーブルで、画像バイナリや表示順を自然に表現できないため）。
-- **旧形式からの移行（後方互換）**: `figure_images` より前の DB では画像が `figure_notes.image_data` に 1 枚だけ入っていました。bibweb は起動時にそれを `figure_images` へ移し、元の列を NULL にします（何度起動してもよい。bibdb の `init_db` も同じことをする）。後方互換を切るときは `migrate_legacy_figure_images` と旧列を消します。
 - `.db` エクスポート/インポート、`bibdb dedup` によるエントリ統合でも、`extras` と同じ lossless 方針で図表メモが引き継がれます（bibdb 側の対応が必要なため、bibdb 本体にも `figure_notes` を認識させています。詳細は冒頭の説明と [bibdb の README](https://github.com/ugohsu/bibdb) を参照してください）。
 
 ### API（参考）
